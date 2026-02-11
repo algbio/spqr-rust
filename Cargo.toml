@@ -1,0 +1,11 @@
+[package]
+name = "spqr-tree-building"
+version = "0.1.0"
+edition = "2024"
+description = "SPQR-tree builder library"
+authors = ["Corentin Moumard <corentin.moumard@helsinki.fi>"]
+license = "MIT"
+repository = "https://github.com/algbio/SPQR-tree-building"
+
+
+[dependencies]
