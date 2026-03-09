@@ -134,3 +134,49 @@ jobs:
 
       - name: cargo check
         run: cargo check --all-targets --all-features
+
+  brute_force:
+    name: Brute-force SPQR verification
+    runs-on: ubuntu-latest
+    needs: ["rust_test"]
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Build in release
+        run: cargo build --release --tests
+
+      - name: "Small exhaustive (n=3..6, all subsets)"
+        run: cargo test --release brute_force_small_exhaustive -- --ignored --nocapture
+
+      - name: "Complete graphs K2..K12"
+        run: cargo test --release brute_force_complete_graphs -- --ignored --nocapture
+
+      - name: "Random simple (no self loops/multiedges) (100k)"
+        env:
+          SPQR_NUM_RANDOM: "100000"
+        run: cargo test --release brute_force_random_biconnected_simple -- --ignored --nocapture
+
+      - name: "Random multigraphs (100k)"
+        env:
+          SPQR_NUM_RANDOM: "100000"
+        run: cargo test --release brute_force_random_biconnected_multigraphs -- --ignored --nocapture
+
+      - name: "Random with self-loops (50k)"
+        env:
+          SPQR_NUM_RANDOM: "50000"
+        run: cargo test --release brute_force_random_with_self_loops -- --ignored --nocapture
+
+      - name: "Large random (2k, n <= 300)"
+        env:
+          SPQR_NUM_LARGE: "2000"
+        run: cargo test --release brute_force_large_random -- --ignored --nocapture
+
+      - name: "Large with self-loops (2k, n <= 300)"
+        env:
+          SPQR_NUM_LARGE: "2000"
+        run: cargo test --release brute_force_large_with_self_loops -- --ignored --nocapture

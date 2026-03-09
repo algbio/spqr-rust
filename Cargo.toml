@@ -1,11 +1,19 @@
 [package]
 name = "spqr-tree-building"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 description = "SPQR-tree builder library"
 authors = ["Corentin Moumard <corentin.moumard@helsinki.fi>"]
 license = "MIT"
 repository = "https://github.com/algbio/SPQR-tree-building"
 
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+[dev-dependencies]
+rand = "0.8"
 
 [dependencies]
