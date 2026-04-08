@@ -1,13 +1,14 @@
 //! # SPQR Tree, triconnectivity decomposition
 //!
 //! Computes SPQR trees of biconnected multigraphs using a DFS based
-//! triconnected components algorithm (Hopcroft-Tarjan with corrections
-//! by Gutwenger & Mutzel, 2001).
+//! triconnected components algorithm (Hopcroft Tarjan with corrections
+//! by Gutwenger and Mutzel in 2001)
 //!
 
 #![forbid(unsafe_code)]
 #![allow(clippy::needless_range_loop)]
 
+pub mod spqr_format;
 pub mod verify;
 
 use std::collections::HashMap;
