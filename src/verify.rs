@@ -91,8 +91,8 @@ pub fn verify_spqr_tree_with_options(
     // 1. Every non self loop real edge in exactly one skeleton
     {
         let mut cnt = vec![0u32; m];
-        for (_, node) in tree.iter() {
-            for edge in &node.skeleton.edges {
+        for tid in tree.iter() {
+            for edge in tree.skeleton_edges_slice(tid) {
                 if edge.real_edge.is_valid() {
                     let eid = edge.real_edge.idx();
                     if eid < m {
@@ -132,9 +132,9 @@ pub fn verify_spqr_tree_with_options(
     }
 
     // 2. Real edge endpoints match original graph
-    for (tid, node) in tree.iter() {
-        let n2o = &node.skeleton.node_to_original;
-        for edge in &node.skeleton.edges {
+    for tid in tree.iter() {
+        let n2o = tree.node_mapping_slice(tid);
+        for edge in tree.skeleton_edges_slice(tid) {
             if !edge.real_edge.is_valid() {
                 continue;
             }
@@ -162,23 +162,25 @@ pub fn verify_spqr_tree_with_options(
     }
 
     // 3-6 node type constraints
-    for (tid, node) in tree.iter() {
-        let ne = node.skeleton.edges.len();
+    for tid in tree.iter() {
+        let edges = tree.skeleton_edges_slice(tid);
+        let ne = edges.len();
         let mut deg: HashMap<u32, u32> = HashMap::new();
-        for e in &node.skeleton.edges {
+        for e in edges {
             *deg.entry(e.src.0).or_default() += 1;
             *deg.entry(e.dst.0).or_default() += 1;
         }
         let nv = deg.len();
+        let node_type = tree.node_type(tid);
 
         if !is_trivial && ne < 3 && errors.len() < 20 {
             errors.push(err(
                 "skeleton_size",
-                format!("{:?} {:?}: {} edges (need ≥3)", node.node_type, tid, ne),
+                format!("{:?} {:?}: {} edges (need ≥3)", node_type, tid, ne),
             ));
         }
 
-        match node.node_type {
+        match node_type {
             SpqrNodeType::S => {
                 if ne != nv && errors.len() < 20 {
                     errors.push(err(
@@ -195,11 +197,7 @@ pub fn verify_spqr_tree_with_options(
                         break;
                     }
                 }
-                if ne == nv
-                    && nv >= 3
-                    && !is_skeleton_connected(&node.skeleton.edges)
-                    && errors.len() < 20
-                {
+                if ne == nv && nv >= 3 && !is_skeleton_connected(edges) && errors.len() < 20 {
                     errors.push(err("s_node_cycle", format!("S {:?}: not connected", tid)));
                 }
             }
@@ -214,7 +212,7 @@ pub fn verify_spqr_tree_with_options(
             SpqrNodeType::R => {
                 let mut pairs: HashSet<(u32, u32)> = HashSet::new();
                 let mut has_dup = false;
-                for e in &node.skeleton.edges {
+                for e in edges {
                     let (a, b) = if e.src.0 <= e.dst.0 {
                         (e.src.0, e.dst.0)
                     } else {
@@ -237,11 +235,7 @@ pub fn verify_spqr_tree_with_options(
                         break;
                     }
                 }
-                if nv >= 4
-                    && !has_dup
-                    && !is_triconnected(&node.skeleton.edges)
-                    && errors.len() < 20
-                {
+                if nv >= 4 && !has_dup && !is_triconnected(edges) && errors.len() < 20 {
                     errors.push(err(
                         "r_node_triconnected",
                         format!("R {:?}: {} nodes, {} edges NOT triconnected", tid, nv, ne),
@@ -253,19 +247,20 @@ pub fn verify_spqr_tree_with_options(
 
     // 7. No adjacent same type
     if opt.require_reduced {
-        for (tid, node) in tree.iter() {
-            let tp = node.node_type;
+        for tid in tree.iter() {
+            let tp = tree.node_type(tid);
             if tp != SpqrNodeType::S && tp != SpqrNodeType::P {
                 continue;
             }
-            if node.parent.is_valid()
-                && node.parent.idx() < tlen
-                && tree.node(node.parent).node_type == tp
+            let parent = tree.parent(tid);
+            if parent.is_valid()
+                && parent.idx() < tlen
+                && tree.node_type(parent) == tp
                 && errors.len() < 20
             {
                 errors.push(err(
                     "adjacent_same_type",
-                    format!("{:?}: {:?} and parent {:?}", tp, tid, node.parent),
+                    format!("{:?}: {:?} and parent {:?}", tp, tid, parent),
                 ));
             }
         }
@@ -274,8 +269,8 @@ pub fn verify_spqr_tree_with_options(
     // 8-9 virtual edge pairing
     {
         let mut virt_locs: HashMap<u32, usize> = HashMap::new();
-        for (_, node) in tree.iter() {
-            for edge in &node.skeleton.edges {
+        for tid in tree.iter() {
+            for edge in tree.skeleton_edges_slice(tid) {
                 if edge.virtual_id != INVALID && !edge.real_edge.is_valid() {
                     *virt_locs.entry(edge.virtual_id).or_default() += 1;
                 }
@@ -289,8 +284,9 @@ pub fn verify_spqr_tree_with_options(
                 ));
             }
         }
-        for (tid, node) in tree.iter() {
-            for (ei, edge) in node.skeleton.edges.iter().enumerate() {
+        for tid in tree.iter() {
+            let edges = tree.skeleton_edges_slice(tid);
+            for (ei, edge) in edges.iter().enumerate() {
                 if !edge.twin_tree_node.is_valid() {
                     continue;
                 }
@@ -299,11 +295,11 @@ pub fn verify_spqr_tree_with_options(
                     continue;
                 }
                 let tei = edge.twin_edge_idx as usize;
-                let twin = tree.node(tt);
-                if tei >= twin.skeleton.edges.len() {
+                let twin_edges = tree.skeleton_edges_slice(tt);
+                if tei >= twin_edges.len() {
                     continue;
                 }
-                let te = &twin.skeleton.edges[tei];
+                let te = &twin_edges[tei];
                 if (te.twin_tree_node != tid || te.twin_edge_idx != ei as u32) && errors.len() < 20
                 {
                     errors.push(err(
@@ -319,8 +315,10 @@ pub fn verify_spqr_tree_with_options(
     }
 
     // 10. Pole consistency
-    for (tid, node) in tree.iter() {
-        for (ei, edge) in node.skeleton.edges.iter().enumerate() {
+    for tid in tree.iter() {
+        let edges = tree.skeleton_edges_slice(tid);
+        let na = tree.node_mapping_slice(tid);
+        for (ei, edge) in edges.iter().enumerate() {
             if !edge.twin_tree_node.is_valid() {
                 continue;
             }
@@ -329,15 +327,12 @@ pub fn verify_spqr_tree_with_options(
                 continue;
             }
             let tei = edge.twin_edge_idx as usize;
-            let twin = tree.node(tt);
-            if tei >= twin.skeleton.edges.len() {
+            let twin_edges = tree.skeleton_edges_slice(tt);
+            if tei >= twin_edges.len() {
                 continue;
             }
-            let te = &twin.skeleton.edges[tei];
-            let (na, nb) = (
-                &node.skeleton.node_to_original,
-                &twin.skeleton.node_to_original,
-            );
+            let te = &twin_edges[tei];
+            let nb = tree.node_mapping_slice(tt);
             let (sa, da, sb, db) = (edge.src.idx(), edge.dst.idx(), te.src.idx(), te.dst.idx());
             if sa < na.len() && da < na.len() && sb < nb.len() && db < nb.len() {
                 let (a0, a1) = (na[sa], na[da]);
@@ -365,16 +360,20 @@ pub fn verify_spqr_tree_with_options(
             queue.push_back(root);
         }
         while let Some(u) = queue.pop_front() {
-            let nd = &tree.nodes[u];
-            for &child in &nd.children {
+            let _tid = TreeNodeId(u as u32);
+            let children_start = tree.children_offsets[u] as usize;
+            let children_end = tree.children_offsets[u + 1] as usize;
+            for ci in children_start..children_end {
+                let child = tree.children[ci];
                 if child.is_valid() && child.idx() < tlen && !visited[child.idx()] {
                     visited[child.idx()] = true;
                     queue.push_back(child.idx());
                 }
             }
-            if nd.parent.is_valid() && nd.parent.idx() < tlen && !visited[nd.parent.idx()] {
-                visited[nd.parent.idx()] = true;
-                queue.push_back(nd.parent.idx());
+            let parent = tree.node_parents[u];
+            if parent.is_valid() && parent.idx() < tlen && !visited[parent.idx()] {
+                visited[parent.idx()] = true;
+                queue.push_back(parent.idx());
             }
         }
         let reachable = visited.iter().filter(|&&x| x).count();

@@ -23,7 +23,7 @@ fn virtual_edge_name(id: usize) -> String {
 }
 
 fn tree_node_name(tree: &SpqrTree, tid: TreeNodeId) -> String {
-    let prefix = match tree.node(tid).node_type {
+    let prefix = match tree.node_type(tid) {
         SpqrNodeType::S => "S",
         SpqrNodeType::P => "P",
         SpqrNodeType::R => "R",
@@ -99,8 +99,8 @@ fn write_spqr_format_inner<W: Write>(
     }
 
     let mut block_nodes = BTreeSet::new();
-    for (_, nd) in tree.iter() {
-        for &orig in &nd.skeleton.node_to_original {
+    for tid in tree.iter() {
+        for &orig in tree.node_mapping_slice(tid) {
             block_nodes.insert(orig.0);
         }
     }
@@ -133,8 +133,8 @@ fn write_spqr_format_inner<W: Write>(
         return Ok(());
     }
 
-    for (tid, nd) in tree.iter() {
-        let type_char = match nd.node_type {
+    for tid in tree.iter() {
+        let type_char = match tree.node_type(tid) {
             SpqrNodeType::S => "S",
             SpqrNodeType::P => "P",
             SpqrNodeType::R => "R",
@@ -142,7 +142,7 @@ fn write_spqr_format_inner<W: Write>(
         let name = tree_node_name(tree, tid);
         write!(w, "{} {} {}", type_char, name, blk)?;
         let mut orig_nodes = BTreeSet::new();
-        for &orig in &nd.skeleton.node_to_original {
+        for &orig in tree.node_mapping_slice(tid) {
             orig_nodes.insert(orig.0);
         }
         for v in &orig_nodes {
@@ -153,8 +153,9 @@ fn write_spqr_format_inner<W: Write>(
     writeln!(w)?;
 
     let mut v_count: usize = 0;
-    for (tid, nd) in tree.iter() {
-        for se in &nd.skeleton.edges {
+    for tid in tree.iter() {
+        let node_to_original = tree.node_mapping_slice(tid);
+        for se in tree.skeleton_edges_slice(tid) {
             if !se.twin_tree_node.is_valid() {
                 continue;
             }
@@ -164,8 +165,8 @@ fn write_spqr_format_inner<W: Write>(
 
             let name = virtual_edge_name(v_count);
             v_count += 1;
-            let node_a = nd.skeleton.node_to_original[se.src.idx()];
-            let node_b = nd.skeleton.node_to_original[se.dst.idx()];
+            let node_a = node_to_original[se.src.idx()];
+            let node_b = node_to_original[se.dst.idx()];
             writeln!(
                 w,
                 "V {} {} {} {} {}",

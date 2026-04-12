@@ -5,11 +5,21 @@
 //! by Gutwenger and Mutzel in 2001)
 //!
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![allow(clippy::needless_range_loop)]
 
+pub mod biconnected;
+pub mod connected;
+#[allow(unsafe_code)]
+pub mod ffi;
 pub mod spqr_format;
 pub mod verify;
+
+pub use biconnected::{BCNodeId, BCNodeType, BCTree, Block};
+pub use connected::{
+    connected_components, connected_components_simple, count_connected_components,
+    ConnectedComponents,
+};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -20,6 +30,22 @@ pub struct NodeId(pub u32);
 pub struct EdgeId(pub u32);
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TreeNodeId(pub u32);
+
+impl Default for NodeId {
+    fn default() -> Self {
+        NodeId::INVALID
+    }
+}
+impl Default for EdgeId {
+    fn default() -> Self {
+        EdgeId::INVALID
+    }
+}
+impl Default for TreeNodeId {
+    fn default() -> Self {
+        TreeNodeId::INVALID
+    }
+}
 
 impl fmt::Debug for NodeId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -103,6 +129,78 @@ impl Graph {
             edges: Vec::with_capacity(m),
         }
     }
+
+    pub fn from_edge_arrays(num_nodes: usize, src: &[u32], dst: &[u32]) -> Self {
+        debug_assert_eq!(src.len(), dst.len());
+        let num_edges = src.len();
+        let mut heads = vec![INVALID; num_nodes];
+        let mut half_edges = Vec::with_capacity(2 * num_edges);
+        let mut edges = Vec::with_capacity(num_edges);
+        for i in 0..num_edges {
+            let u = src[i];
+            let v = dst[i];
+            let eid = i as u32;
+            edges.push(Edge {
+                src: NodeId(u),
+                dst: NodeId(v),
+            });
+            let idx_uv = half_edges.len() as u32;
+            let idx_vu = idx_uv + 1;
+            half_edges.push(HalfEdge {
+                target: NodeId(v),
+                edge_id: EdgeId(eid),
+                next: heads[u as usize],
+            });
+            heads[u as usize] = idx_uv;
+            half_edges.push(HalfEdge {
+                target: NodeId(u),
+                edge_id: EdgeId(eid),
+                next: heads[v as usize],
+            });
+            heads[v as usize] = idx_vu;
+        }
+        Graph {
+            heads,
+            half_edges,
+            edges,
+        }
+    }
+
+    pub fn from_edge_pairs(num_nodes: usize, pairs: &[u32]) -> Self {
+        debug_assert_eq!(pairs.len() % 2, 0);
+        let num_edges = pairs.len() / 2;
+        let mut heads = vec![INVALID; num_nodes];
+        let mut half_edges = Vec::with_capacity(2 * num_edges);
+        let mut edges = Vec::with_capacity(num_edges);
+        for i in 0..num_edges {
+            let u = pairs[i * 2];
+            let v = pairs[i * 2 + 1];
+            let eid = i as u32;
+            edges.push(Edge {
+                src: NodeId(u),
+                dst: NodeId(v),
+            });
+            let idx_uv = half_edges.len() as u32;
+            let idx_vu = idx_uv + 1;
+            half_edges.push(HalfEdge {
+                target: NodeId(v),
+                edge_id: EdgeId(eid),
+                next: heads[u as usize],
+            });
+            heads[u as usize] = idx_uv;
+            half_edges.push(HalfEdge {
+                target: NodeId(u),
+                edge_id: EdgeId(eid),
+                next: heads[v as usize],
+            });
+            heads[v as usize] = idx_vu;
+        }
+        Graph {
+            heads,
+            half_edges,
+            edges,
+        }
+    }
     pub fn add_node(&mut self) -> NodeId {
         let id = NodeId(self.heads.len() as u32);
         self.heads.push(INVALID);
@@ -112,6 +210,9 @@ impl Graph {
         let start = self.heads.len() as u32;
         self.heads.resize(self.heads.len() + n, INVALID);
         (start..start + n as u32).map(NodeId).collect()
+    }
+    pub fn add_nodes_fast(&mut self, n: usize) {
+        self.heads.resize(self.heads.len() + n, INVALID);
     }
     #[inline]
     pub fn num_nodes(&self) -> usize {
@@ -167,6 +268,18 @@ impl Graph {
             self.heads[v] = prev;
         }
     }
+    #[inline(always)]
+    pub fn adj_cursor(&self, u: NodeId) -> u32 {
+        self.heads[u.idx()]
+    }
+    #[inline(always)]
+    pub fn adj_next(&self, cursor: u32) -> Option<(NodeId, EdgeId, u32)> {
+        if cursor == INVALID {
+            return None;
+        }
+        let he = &self.half_edges[cursor as usize];
+        Some((he.target, he.edge_id, he.next))
+    }
 }
 
 pub struct NeighborIter<'a> {
@@ -195,7 +308,8 @@ pub enum SpqrNodeType {
     R,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct SkeletonEdge {
     pub src: NodeId,
     pub dst: NodeId,
@@ -205,71 +319,138 @@ pub struct SkeletonEdge {
     pub twin_edge_idx: u32,
 }
 
-#[derive(Clone, Debug)]
-pub struct Skeleton {
-    pub num_nodes: u32,
-    pub edges: Vec<SkeletonEdge>,
-    pub node_to_original: Vec<NodeId>,
-}
-impl Skeleton {
-    fn new() -> Self {
-        Skeleton {
-            num_nodes: 0,
-            edges: Vec::new(),
-            node_to_original: Vec::new(),
+impl Default for SkeletonEdge {
+    fn default() -> Self {
+        SkeletonEdge {
+            src: NodeId::INVALID,
+            dst: NodeId::INVALID,
+            real_edge: EdgeId::INVALID,
+            virtual_id: INVALID,
+            twin_tree_node: TreeNodeId::INVALID,
+            twin_edge_idx: INVALID,
         }
     }
+}
+
+pub struct SkeletonView<'a> {
+    pub num_nodes: u32,
+    pub edges: &'a [SkeletonEdge],
+    pub node_to_original: &'a [NodeId],
+}
+
+impl<'a> SkeletonView<'a> {
     pub fn poles(&self) -> (NodeId, NodeId) {
         (self.node_to_original[0], self.node_to_original[1])
     }
     pub fn num_edges(&self) -> usize {
         self.edges.len()
     }
-    pub fn real_edges(&self) -> impl Iterator<Item = (usize, &SkeletonEdge)> {
-        self.edges
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.real_edge.is_valid())
-    }
-    pub fn virtual_edges(&self) -> impl Iterator<Item = (usize, &SkeletonEdge)> {
-        self.edges
-            .iter()
-            .enumerate()
-            .filter(|(_, e)| e.twin_tree_node.is_valid())
-    }
 }
 
-#[derive(Clone, Debug)]
-pub struct SpqrTreeNode {
+pub struct SpqrTreeNodeView<'a> {
     pub node_type: SpqrNodeType,
-    pub skeleton: Skeleton,
+    pub skeleton: SkeletonView<'a>,
     pub parent: TreeNodeId,
-    pub children: Vec<TreeNodeId>,
+    pub children: &'a [TreeNodeId],
 }
 
 pub struct SpqrTree {
-    pub nodes: Vec<SpqrTreeNode>,
     pub root: TreeNodeId,
-    edge_to_tree_node: Vec<TreeNodeId>,
+    pub node_types: Vec<SpqrNodeType>,
+    pub node_parents: Vec<TreeNodeId>,
+    pub children_offsets: Vec<u32>,
+    pub children: Vec<TreeNodeId>,
+    pub skeleton_offsets: Vec<u32>,
+    pub skeleton_edges: Vec<SkeletonEdge>,
+    pub node_mapping_offsets: Vec<u32>,
+    pub node_mapping: Vec<NodeId>,
+    pub skeleton_num_nodes: Vec<u32>,
+    pub edge_to_tree_node: Vec<TreeNodeId>,
 }
+
 impl SpqrTree {
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        self.node_types.len()
     }
+
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.node_types.is_empty()
     }
+
     #[inline]
-    pub fn node(&self, id: TreeNodeId) -> &SpqrTreeNode {
-        &self.nodes[id.idx()]
+    pub fn node_type(&self, id: TreeNodeId) -> SpqrNodeType {
+        self.node_types[id.idx()]
     }
+
+    #[inline]
+    pub fn parent(&self, id: TreeNodeId) -> TreeNodeId {
+        self.node_parents[id.idx()]
+    }
+
+    #[inline]
+    pub fn children_slice(&self, id: TreeNodeId) -> &[TreeNodeId] {
+        let start = self.children_offsets[id.idx()] as usize;
+        let end = self.children_offsets[id.idx() + 1] as usize;
+        &self.children[start..end]
+    }
+
+    #[inline]
+    pub fn skeleton_edges_slice(&self, id: TreeNodeId) -> &[SkeletonEdge] {
+        let start = self.skeleton_offsets[id.idx()] as usize;
+        let end = self.skeleton_offsets[id.idx() + 1] as usize;
+        &self.skeleton_edges[start..end]
+    }
+
+    #[inline]
+    pub fn skeleton_edges_slice_mut(&mut self, id: TreeNodeId) -> &mut [SkeletonEdge] {
+        let start = self.skeleton_offsets[id.idx()] as usize;
+        let end = self.skeleton_offsets[id.idx() + 1] as usize;
+        &mut self.skeleton_edges[start..end]
+    }
+
+    #[inline]
+    pub fn skeleton_edge_mut(
+        &mut self,
+        tree_node: TreeNodeId,
+        edge_idx: usize,
+    ) -> &mut SkeletonEdge {
+        let start = self.skeleton_offsets[tree_node.idx()] as usize;
+        &mut self.skeleton_edges[start + edge_idx]
+    }
+
+    #[inline]
+    pub fn node_mapping_slice(&self, id: TreeNodeId) -> &[NodeId] {
+        let start = self.node_mapping_offsets[id.idx()] as usize;
+        let end = self.node_mapping_offsets[id.idx() + 1] as usize;
+        &self.node_mapping[start..end]
+    }
+
+    #[inline]
+    pub fn skeleton_num_nodes(&self, id: TreeNodeId) -> u32 {
+        self.skeleton_num_nodes[id.idx()]
+    }
+
+    pub fn node(&self, id: TreeNodeId) -> SpqrTreeNodeView<'_> {
+        SpqrTreeNodeView {
+            node_type: self.node_types[id.idx()],
+            skeleton: SkeletonView {
+                num_nodes: self.skeleton_num_nodes[id.idx()],
+                edges: self.skeleton_edges_slice(id),
+                node_to_original: self.node_mapping_slice(id),
+            },
+            parent: self.node_parents[id.idx()],
+            children: self.children_slice(id),
+        }
+    }
+
     pub fn tree_node_of_edge(&self, eid: EdgeId) -> TreeNodeId {
         self.edge_to_tree_node[eid.idx()]
     }
+
     pub fn count_by_type(&self) -> (usize, usize, usize) {
         let (mut s, mut p, mut r) = (0, 0, 0);
-        for n in &self.nodes {
-            match n.node_type {
+        for &t in &self.node_types {
+            match t {
                 SpqrNodeType::S => s += 1,
                 SpqrNodeType::P => p += 1,
                 SpqrNodeType::R => r += 1,
@@ -277,11 +458,54 @@ impl SpqrTree {
         }
         (s, p, r)
     }
-    pub fn iter(&self) -> impl Iterator<Item = (TreeNodeId, &SpqrTreeNode)> {
-        self.nodes
-            .iter()
-            .enumerate()
-            .map(|(i, n)| (TreeNodeId(i as u32), n))
+
+    pub fn iter(&self) -> impl Iterator<Item = TreeNodeId> + '_ {
+        (0..self.len()).map(|i| TreeNodeId(i as u32))
+    }
+
+    fn empty(num_edges: usize) -> Self {
+        SpqrTree {
+            root: TreeNodeId::INVALID,
+            node_types: Vec::new(),
+            node_parents: Vec::new(),
+            children_offsets: vec![0],
+            children: Vec::new(),
+            skeleton_offsets: vec![0],
+            skeleton_edges: Vec::new(),
+            node_mapping_offsets: vec![0],
+            node_mapping: Vec::new(),
+            skeleton_num_nodes: Vec::new(),
+            edge_to_tree_node: vec![TreeNodeId::INVALID; num_edges],
+        }
+    }
+
+    fn single_node(
+        num_edges: usize,
+        node_type: SpqrNodeType,
+        num_skel_nodes: u32,
+        edges: Vec<SkeletonEdge>,
+        node_to_original: Vec<NodeId>,
+    ) -> Self {
+        let mut edge_to_tree_node = vec![TreeNodeId::INVALID; num_edges];
+        for edge in &edges {
+            if edge.real_edge.is_valid() {
+                edge_to_tree_node[edge.real_edge.idx()] = TreeNodeId(0);
+            }
+        }
+
+        SpqrTree {
+            root: TreeNodeId(0),
+            node_types: vec![node_type],
+            node_parents: vec![TreeNodeId::INVALID],
+            children_offsets: vec![0, 0],
+            children: Vec::new(),
+            skeleton_offsets: vec![0, edges.len() as u32],
+            skeleton_edges: edges,
+            node_mapping_offsets: vec![0, node_to_original.len() as u32],
+            node_mapping: node_to_original,
+            skeleton_num_nodes: vec![num_skel_nodes],
+            edge_to_tree_node,
+        }
     }
 }
 
@@ -297,6 +521,116 @@ pub struct SpqrResult {
 }
 
 // Triconnectivity decomposition
+
+struct SpqrTreeBuilder {
+    node_types: Vec<SpqrNodeType>,
+    node_parents: Vec<TreeNodeId>,
+    skeleton_num_nodes: Vec<u32>,
+    skeleton_offsets: Vec<u32>,
+    skeleton_edges: Vec<SkeletonEdge>,
+    node_mapping_offsets: Vec<u32>,
+    node_mapping: Vec<NodeId>,
+    edge_to_tree_node: Vec<TreeNodeId>,
+}
+
+impl SpqrTreeBuilder {
+    fn new(num_edges: usize) -> Self {
+        SpqrTreeBuilder {
+            node_types: Vec::new(),
+            node_parents: Vec::new(),
+            skeleton_num_nodes: Vec::new(),
+            skeleton_offsets: vec![0],
+            skeleton_edges: Vec::new(),
+            node_mapping_offsets: vec![0],
+            node_mapping: Vec::new(),
+            edge_to_tree_node: vec![TreeNodeId::INVALID; num_edges],
+        }
+    }
+
+    fn add_node(
+        &mut self,
+        node_type: SpqrNodeType,
+        num_nodes: u32,
+        edges: Vec<SkeletonEdge>,
+        node_to_original: Vec<NodeId>,
+    ) -> TreeNodeId {
+        let tid = TreeNodeId(self.node_types.len() as u32);
+
+        // Mark real edges
+        for edge in &edges {
+            if edge.real_edge.is_valid() {
+                self.edge_to_tree_node[edge.real_edge.idx()] = tid;
+            }
+        }
+
+        self.node_types.push(node_type);
+        self.node_parents.push(TreeNodeId::INVALID);
+        self.skeleton_num_nodes.push(num_nodes);
+
+        // Skeleton edges
+        self.skeleton_edges.extend(edges);
+        self.skeleton_offsets.push(self.skeleton_edges.len() as u32);
+
+        // Node mapping
+        self.node_mapping.extend(node_to_original);
+        self.node_mapping_offsets
+            .push(self.node_mapping.len() as u32);
+
+        tid
+    }
+
+    fn skeleton_edge_mut(&mut self, tree_node: TreeNodeId, edge_idx: usize) -> &mut SkeletonEdge {
+        let start = self.skeleton_offsets[tree_node.idx()] as usize;
+        &mut self.skeleton_edges[start + edge_idx]
+    }
+
+    fn skeleton_edges_len(&self, tree_node: TreeNodeId) -> usize {
+        let start = self.skeleton_offsets[tree_node.idx()] as usize;
+        let end = self.skeleton_offsets[tree_node.idx() + 1] as usize;
+        end - start
+    }
+
+    fn num_nodes(&self) -> usize {
+        self.node_types.len()
+    }
+
+    fn finalize_with_children(
+        self,
+        root: TreeNodeId,
+        children_offsets: Vec<u32>,
+        children: Vec<TreeNodeId>,
+    ) -> SpqrTree {
+        SpqrTree {
+            root,
+            node_types: self.node_types,
+            node_parents: self.node_parents,
+            children_offsets,
+            children,
+            skeleton_offsets: self.skeleton_offsets,
+            skeleton_edges: self.skeleton_edges,
+            node_mapping_offsets: self.node_mapping_offsets,
+            node_mapping: self.node_mapping,
+            skeleton_num_nodes: self.skeleton_num_nodes,
+            edge_to_tree_node: self.edge_to_tree_node,
+        }
+    }
+
+    fn finalize_empty(self) -> SpqrTree {
+        SpqrTree {
+            root: TreeNodeId::INVALID,
+            node_types: Vec::new(),
+            node_parents: Vec::new(),
+            children_offsets: vec![0],
+            children: Vec::new(),
+            skeleton_offsets: vec![0],
+            skeleton_edges: Vec::new(),
+            node_mapping_offsets: vec![0],
+            node_mapping: Vec::new(),
+            skeleton_num_nodes: Vec::new(),
+            edge_to_tree_node: self.edge_to_tree_node,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct StackEdge {
@@ -356,18 +690,10 @@ fn build_spqr_tree_filtered(graph: &Graph, is_self_loop: &[bool]) -> SpqrTree {
     let m_real = m - is_self_loop.iter().filter(|&&b| b).count();
 
     if n == 0 || m_real == 0 {
-        return SpqrTree {
-            nodes: Vec::new(),
-            root: TreeNodeId::INVALID,
-            edge_to_tree_node: vec![TreeNodeId::INVALID; m],
-        };
+        return SpqrTree::empty(m);
     }
     if n == 1 {
-        return SpqrTree {
-            nodes: Vec::new(),
-            root: TreeNodeId::INVALID,
-            edge_to_tree_node: vec![TreeNodeId::INVALID; m],
-        };
+        return SpqrTree::empty(m);
     }
     if m_real == 1 {
         let mut eid_real = 0;
@@ -378,29 +704,15 @@ fn build_spqr_tree_filtered(graph: &Graph, is_self_loop: &[bool]) -> SpqrTree {
             }
         }
         let e = graph.edge(EdgeId(eid_real as u32));
-        let mut sk = Skeleton::new();
-        sk.num_nodes = 2;
-        sk.node_to_original = vec![e.src, e.dst];
-        sk.edges.push(SkeletonEdge {
+        let edges = vec![SkeletonEdge {
             src: NodeId(0),
             dst: NodeId(1),
             real_edge: EdgeId(eid_real as u32),
             virtual_id: INVALID,
             twin_tree_node: TreeNodeId::INVALID,
             twin_edge_idx: INVALID,
-        });
-        let mut ettn = vec![TreeNodeId::INVALID; m];
-        ettn[eid_real] = TreeNodeId(0);
-        return SpqrTree {
-            nodes: vec![SpqrTreeNode {
-                node_type: SpqrNodeType::P,
-                skeleton: sk,
-                parent: TreeNodeId::INVALID,
-                children: Vec::new(),
-            }],
-            root: TreeNodeId(0),
-            edge_to_tree_node: ettn,
-        };
+        }];
+        return SpqrTree::single_node(m, SpqrNodeType::P, 2, edges, vec![e.src, e.dst]);
     }
 
     // Count distinct non self loop endpoints
@@ -503,16 +815,15 @@ fn build_spqr_tree_filtered(graph: &Graph, is_self_loop: &[bool]) -> SpqrTree {
 
 fn build_parallel_case(graph: &Graph, is_self_loop: &[bool]) -> SpqrTree {
     let m = graph.num_edges();
-    let mut sk = Skeleton::new();
-    sk.num_nodes = 2;
-    sk.node_to_original = vec![NodeId(0), NodeId(1)];
-    let mut ettn = vec![TreeNodeId::INVALID; m];
+    let mut edges = Vec::new();
+    let mut edge_to_tree_node = vec![TreeNodeId::INVALID; m];
+
     for i in 0..m {
         if is_self_loop[i] {
             continue;
         }
         let e = graph.edge(EdgeId(i as u32));
-        sk.edges.push(SkeletonEdge {
+        edges.push(SkeletonEdge {
             src: if e.src == NodeId(0) {
                 NodeId(0)
             } else {
@@ -528,17 +839,21 @@ fn build_parallel_case(graph: &Graph, is_self_loop: &[bool]) -> SpqrTree {
             twin_tree_node: TreeNodeId::INVALID,
             twin_edge_idx: INVALID,
         });
-        ettn[i] = TreeNodeId(0);
+        edge_to_tree_node[i] = TreeNodeId(0);
     }
+
     SpqrTree {
-        nodes: vec![SpqrTreeNode {
-            node_type: SpqrNodeType::P,
-            skeleton: sk,
-            parent: TreeNodeId::INVALID,
-            children: Vec::new(),
-        }],
         root: TreeNodeId(0),
-        edge_to_tree_node: ettn,
+        node_types: vec![SpqrNodeType::P],
+        node_parents: vec![TreeNodeId::INVALID],
+        children_offsets: vec![0, 0],
+        children: Vec::new(),
+        skeleton_offsets: vec![0, edges.len() as u32],
+        skeleton_edges: edges,
+        node_mapping_offsets: vec![0, 2],
+        node_mapping: vec![NodeId(0), NodeId(1)],
+        skeleton_num_nodes: vec![2],
+        edge_to_tree_node,
     }
 }
 
@@ -763,7 +1078,13 @@ fn triconn_decompose(
     }
 
     let maxb = 3 * n as i32 + 2;
-    let mut bkt: Vec<Vec<u32>> = vec![Vec::new(); (maxb + 1) as usize];
+
+    // Build oadj in CSR format without Vec<Vec>
+    // Pass 1: Count edges per phi bucket and per source node
+    let mut phi_count: Vec<u32> = vec![0; (maxb + 2) as usize];
+    let mut oadj_count: Vec<u32> = vec![0; n];
+    let mut edge_phi: Vec<i32> = vec![0; m];
+
     for i in 0..m {
         if etype_orig[i] == 0 || etype_orig[i] == 3 {
             continue;
@@ -778,15 +1099,57 @@ fn triconn_decompose(
             3 * lp1[w as usize] + 2
         };
         if phi >= 1 && phi <= maxb {
-            bkt[phi as usize].push(i as u32);
+            edge_phi[i] = phi;
+            phi_count[phi as usize] += 1;
+            oadj_count[esrc[i] as usize] += 1;
         }
     }
-    let mut oadj: Vec<Vec<u32>> = vec![Vec::new(); n];
+
+    // Build phi bucket offsets
+    let mut phi_offsets: Vec<u32> = vec![0; (maxb + 2) as usize];
+    for i in 1..=(maxb as usize + 1) {
+        phi_offsets[i] = phi_offsets[i - 1] + phi_count[i - 1];
+    }
+    let total_edges = phi_offsets[maxb as usize + 1] as usize;
+
+    // Build oadj offsets
+    let mut oadj_offsets: Vec<u32> = vec![0; n + 1];
+    for i in 0..n {
+        oadj_offsets[i + 1] = oadj_offsets[i] + oadj_count[i];
+    }
+
+    // Pass 2: Place edges into phi buckets
+    let mut bkt_flat: Vec<u32> = vec![0; total_edges];
+    let mut phi_write: Vec<u32> = phi_offsets[..=(maxb as usize)].to_vec();
+    for i in 0..m {
+        let phi = edge_phi[i];
+        if phi >= 1 && phi <= maxb {
+            let pos = phi_write[phi as usize] as usize;
+            bkt_flat[pos] = i as u32;
+            phi_write[phi as usize] += 1;
+        }
+    }
+    drop(phi_write);
+    drop(phi_count);
+    drop(edge_phi);
+
+    // Pass 3: Build oadj_flat from sorted buckets
+    let mut oadj_flat: Vec<u32> = vec![0; total_edges];
+    let mut oadj_write: Vec<u32> = oadj_offsets[..n].to_vec();
     for phi in 1..=(maxb as usize) {
-        for &ei in &bkt[phi] {
-            oadj[esrc[ei as usize] as usize].push(ei);
+        let start = phi_offsets[phi] as usize;
+        let end = phi_offsets[phi + 1] as usize;
+        for idx in start..end {
+            let ei = bkt_flat[idx];
+            let src = esrc[ei as usize] as usize;
+            let pos = oadj_write[src] as usize;
+            oadj_flat[pos] = ei;
+            oadj_write[src] += 1;
         }
     }
+    drop(bkt_flat);
+    drop(phi_offsets);
+    drop(oadj_write);
 
     let mut startf = vec![false; m];
     let mut hp_init: Vec<Vec<(i32, u32)>> = vec![Vec::new(); n];
@@ -810,12 +1173,13 @@ fn triconn_decompose(
                 fr.pend = false;
                 nc -= 1;
             }
-            let v = fr.v;
-            if fr.idx >= oadj[v as usize].len() {
+            let v = fr.v as usize;
+            let oadj_len = (oadj_offsets[v + 1] - oadj_offsets[v]) as usize;
+            if fr.idx >= oadj_len {
                 pfs.pop();
                 continue;
             }
-            let ei = oadj[v as usize][fr.idx] as usize;
+            let ei = oadj_flat[oadj_offsets[v] as usize + fr.idx] as usize;
             fr.idx += 1;
             let w = edst[ei];
             if np {
@@ -831,7 +1195,7 @@ fn triconn_decompose(
                     pend: false,
                 });
             } else {
-                hp_init[w as usize].push((newnum[v as usize], ei as u32));
+                hp_init[w as usize].push((newnum[fr.v as usize], ei as u32));
                 np = true;
             }
         }
@@ -854,7 +1218,8 @@ fn triconn_decompose(
         me_start[idx as usize] = startf[i];
     }
     for v in 0..n {
-        for &ei in &oadj[v] {
+        for idx in oadj_offsets[v] as usize..oadj_offsets[v + 1] as usize {
+            let ei = oadj_flat[idx];
             let slot = al_edge.len() as u32;
             al_edge.push(ei);
             al_next.push(INVALID);
@@ -1621,11 +1986,12 @@ fn merge_same_type_components(comps: &mut Vec<SplitComponent>, m: usize) {
 fn assemble_spqr_tree(graph: &Graph, components: &[SplitComponent], next_virtual: u32) -> SpqrTree {
     let m = graph.num_edges();
     let base = m as u32;
-    let mut tree_nodes: Vec<SpqrTreeNode> = Vec::with_capacity(components.len());
-    let mut edge_to_tree_node = vec![TreeNodeId::INVALID; m];
+
+    // Use builder for flat construction
+    let mut builder = SpqrTreeBuilder::new(m);
+
     for comp in components {
         let nt = classify_component(comp);
-        let tid = TreeNodeId(tree_nodes.len() as u32);
         let mut lid: HashMap<u32, u32> = HashMap::new();
         let mut n2o: Vec<NodeId> = Vec::new();
         let mut local_of = |v: u32| -> u32 {
@@ -1645,9 +2011,6 @@ fn assemble_spqr_tree(graph: &Graph, components: &[SplitComponent], next_virtual
             let ls = NodeId(local_of(edge.src));
             let ld = NodeId(local_of(edge.dst));
             let is_real = (edge.eid as usize) < m;
-            if is_real {
-                edge_to_tree_node[edge.eid as usize] = tid;
-            }
             se.push(SkeletonEdge {
                 src: ls,
                 dst: ld,
@@ -1661,23 +2024,24 @@ fn assemble_spqr_tree(graph: &Graph, components: &[SplitComponent], next_virtual
                 twin_edge_idx: INVALID,
             });
         }
-        tree_nodes.push(SpqrTreeNode {
-            node_type: nt,
-            skeleton: Skeleton {
-                num_nodes: n2o.len() as u32,
-                edges: se,
-                node_to_original: n2o,
-            },
-            parent: TreeNodeId::INVALID,
-            children: Vec::new(),
-        });
+        builder.add_node(nt, n2o.len() as u32, se, n2o);
     }
+
+    let num_nodes = builder.num_nodes();
+    if num_nodes == 0 {
+        return builder.finalize_empty();
+    }
+
+    // Link virtual edges
     let num_virtual = next_virtual.saturating_sub(base) as usize;
     let mut first: Vec<Option<(usize, u32)>> = vec![None; num_virtual];
     let mut pairs: Vec<(usize, u32, usize, u32)> = Vec::new();
-    for ti in 0..tree_nodes.len() {
-        for ei in 0..tree_nodes[ti].skeleton.edges.len() {
-            let vid = tree_nodes[ti].skeleton.edges[ei].virtual_id;
+
+    for ti in 0..num_nodes {
+        for ei in 0..builder.skeleton_edges_len(TreeNodeId(ti as u32)) {
+            let vid = builder
+                .skeleton_edge_mut(TreeNodeId(ti as u32), ei)
+                .virtual_id;
             if vid == INVALID {
                 continue;
             }
@@ -1691,278 +2055,525 @@ fn assemble_spqr_tree(graph: &Graph, components: &[SplitComponent], next_virtual
             }
         }
     }
+
+    // Clear unpaired virtual edges
     for entry in &first {
         if let Some(&(ti, ei)) = entry.as_ref() {
-            let edge = &mut tree_nodes[ti].skeleton.edges[ei as usize];
+            let edge = builder.skeleton_edge_mut(TreeNodeId(ti as u32), ei as usize);
             edge.virtual_id = INVALID;
             edge.twin_tree_node = TreeNodeId::INVALID;
             edge.twin_edge_idx = INVALID;
         }
     }
-    let mut tree_adj: Vec<Vec<TreeNodeId>> = vec![Vec::new(); tree_nodes.len()];
+
+    // Build tree adjacency in CSR format
+    let mut tree_adj_count: Vec<u32> = vec![0; num_nodes];
+    for &(a, _, b, _) in &pairs {
+        tree_adj_count[a] += 1;
+        tree_adj_count[b] += 1;
+    }
+    let mut tree_adj_offsets: Vec<u32> = vec![0; num_nodes + 1];
+    for i in 0..num_nodes {
+        tree_adj_offsets[i + 1] = tree_adj_offsets[i] + tree_adj_count[i];
+    }
+    let tree_adj_total = tree_adj_offsets[num_nodes] as usize;
+    let mut tree_adj_flat: Vec<TreeNodeId> = vec![TreeNodeId::INVALID; tree_adj_total];
+    let mut tree_adj_write: Vec<u32> = tree_adj_offsets[..num_nodes].to_vec();
+
     for (a, ea, b, eb) in pairs {
         assert!(a != b);
         let ta = TreeNodeId(a as u32);
-        let t_b = TreeNodeId(b as u32);
-        if a < b {
-            let (left, right) = tree_nodes.split_at_mut(b);
-            left[a].skeleton.edges[ea as usize].twin_tree_node = t_b;
-            left[a].skeleton.edges[ea as usize].twin_edge_idx = eb;
-            right[0].skeleton.edges[eb as usize].twin_tree_node = ta;
-            right[0].skeleton.edges[eb as usize].twin_edge_idx = ea;
-        } else {
-            let (left, right) = tree_nodes.split_at_mut(a);
-            left[b].skeleton.edges[eb as usize].twin_tree_node = ta;
-            left[b].skeleton.edges[eb as usize].twin_edge_idx = ea;
-            right[0].skeleton.edges[ea as usize].twin_tree_node = t_b;
-            right[0].skeleton.edges[ea as usize].twin_edge_idx = eb;
-        }
-        tree_adj[a].push(t_b);
-        tree_adj[b].push(ta);
+        let tb = TreeNodeId(b as u32);
+
+        builder.skeleton_edge_mut(ta, ea as usize).twin_tree_node = tb;
+        builder.skeleton_edge_mut(ta, ea as usize).twin_edge_idx = eb;
+        builder.skeleton_edge_mut(tb, eb as usize).twin_tree_node = ta;
+        builder.skeleton_edge_mut(tb, eb as usize).twin_edge_idx = ea;
+
+        tree_adj_flat[tree_adj_write[a] as usize] = tb;
+        tree_adj_write[a] += 1;
+        tree_adj_flat[tree_adj_write[b] as usize] = ta;
+        tree_adj_write[b] += 1;
     }
-    let root = if tree_nodes.is_empty() {
-        TreeNodeId::INVALID
-    } else {
-        TreeNodeId(0)
-    };
-    if root.is_valid() {
-        let mut par = vec![TreeNodeId::INVALID; tree_nodes.len()];
-        let mut vis = vec![false; tree_nodes.len()];
-        let mut st = vec![root];
-        vis[root.idx()] = true;
-        while let Some(v) = st.pop() {
-            for &u in &tree_adj[v.idx()] {
-                if vis[u.idx()] {
-                    continue;
-                }
-                vis[u.idx()] = true;
-                par[u.idx()] = v;
-                st.push(u);
+    drop(tree_adj_write);
+    drop(tree_adj_count);
+
+    // Build parent-child relationships via BFS
+    let root = TreeNodeId(0);
+    let mut par = vec![TreeNodeId::INVALID; num_nodes];
+    let mut vis = vec![false; num_nodes];
+    let mut st = vec![root];
+    vis[0] = true;
+
+    while let Some(v) = st.pop() {
+        for idx in tree_adj_offsets[v.idx()] as usize..tree_adj_offsets[v.idx() + 1] as usize {
+            let u = tree_adj_flat[idx];
+            if vis[u.idx()] {
+                continue;
             }
-        }
-        if !vis.iter().all(|&b| b) {
-            for (i, &v) in vis.iter().enumerate() {
-                if !v {
-                    par[i] = root;
-                }
-            }
-        }
-        for i in 0..tree_nodes.len() {
-            tree_nodes[i].parent = par[i];
-            tree_nodes[i].children.clear();
-        }
-        for i in 0..tree_nodes.len() {
-            let p = par[i];
-            if p.is_valid() {
-                tree_nodes[p.idx()].children.push(TreeNodeId(i as u32));
-            }
+            vis[u.idx()] = true;
+            par[u.idx()] = v;
+            st.push(u);
         }
     }
-    SpqrTree {
-        nodes: tree_nodes,
-        root,
-        edge_to_tree_node,
+    drop(tree_adj_flat);
+    drop(tree_adj_offsets);
+
+    // Handle disconnected nodes
+    for (i, &v) in vis.iter().enumerate() {
+        if !v {
+            par[i] = root;
+        }
     }
+
+    // Set parents in builder
+    builder.node_parents[..num_nodes].copy_from_slice(&par[..num_nodes]);
+
+    // Build children CSR directly
+    let mut children_count: Vec<u32> = vec![0; num_nodes];
+    for i in 0..num_nodes {
+        let p = par[i];
+        if p.is_valid() {
+            children_count[p.idx()] += 1;
+        }
+    }
+    let mut children_offsets: Vec<u32> = vec![0; num_nodes + 1];
+    for i in 0..num_nodes {
+        children_offsets[i + 1] = children_offsets[i] + children_count[i];
+    }
+    let children_total = children_offsets[num_nodes] as usize;
+    let mut children_flat: Vec<TreeNodeId> = vec![TreeNodeId::INVALID; children_total];
+    let mut children_write: Vec<u32> = children_offsets[..num_nodes].to_vec();
+    for i in 0..num_nodes {
+        let p = par[i];
+        if p.is_valid() {
+            children_flat[children_write[p.idx()] as usize] = TreeNodeId(i as u32);
+            children_write[p.idx()] += 1;
+        }
+    }
+    drop(children_write);
+    drop(children_count);
+
+    builder.finalize_with_children(root, children_offsets, children_flat)
 }
 
 impl SpqrTree {
     pub fn normalize(&mut self) {
+        // For flat structure, normalize by rebuilding with merged same-type adjacent nodes
+        // This is O(n) time and space, same as original
+
+        let n = self.len();
+        if n == 0 {
+            return;
+        }
+
+        // Track which nodes are absorbed into others
+        let mut absorbed_into: Vec<Option<TreeNodeId>> = vec![None; n];
         let mut changed = true;
+
         while changed {
             changed = false;
-            for i in 0..self.nodes.len() {
-                if self.nodes[i].skeleton.edges.is_empty() {
+
+            for i in 0..n {
+                if absorbed_into[i].is_some() {
                     continue;
                 }
-                let t = self.nodes[i].node_type;
+                let num_edges = self.skeleton_offsets[i + 1] - self.skeleton_offsets[i];
+                if num_edges == 0 {
+                    continue;
+                }
+
+                let t = self.node_types[i];
                 if t != SpqrNodeType::S && t != SpqrNodeType::P {
                     continue;
                 }
-                let parent = TreeNodeId(i as u32);
-                let children = self.nodes[i].children.clone();
-                for child in children {
-                    if !child.is_valid() || child.idx() >= self.nodes.len() {
+
+                // Check children for same-type nodes to merge
+                let children_start = self.children_offsets[i] as usize;
+                let children_end = self.children_offsets[i + 1] as usize;
+
+                for ci in children_start..children_end {
+                    let child = self.children[ci];
+                    if !child.is_valid() || absorbed_into[child.idx()].is_some() {
                         continue;
                     }
-                    if self.nodes[child.idx()].skeleton.edges.is_empty() {
+
+                    let child_num_edges =
+                        self.skeleton_offsets[child.idx() + 1] - self.skeleton_offsets[child.idx()];
+                    if child_num_edges == 0 {
                         continue;
                     }
-                    if self.nodes[child.idx()].node_type == t {
-                        self.merge_into_parent(parent, child);
+
+                    if self.node_types[child.idx()] == t {
+                        absorbed_into[child.idx()] = Some(TreeNodeId(i as u32));
                         changed = true;
                     }
                 }
             }
         }
+
+        // If nothing was absorbed, we're done
+        if absorbed_into.iter().all(|x| x.is_none()) {
+            return;
+        }
+
+        // Rebuild the tree with merged nodes
+        self.rebuild_with_merges(&absorbed_into);
     }
 
-    fn swap_remove_skeleton_edge(&mut self, tid: TreeNodeId, idx: usize) -> SkeletonEdge {
-        let (swapped_twin, removed) = {
-            let node = &mut self.nodes[tid.idx()];
-            let last = node.skeleton.edges.len() - 1;
-            let mut swapped_twin: Option<(TreeNodeId, u32)> = None;
-            if idx != last {
-                node.skeleton.edges.swap(idx, last);
-                let e = &node.skeleton.edges[idx];
-                if e.virtual_id != INVALID && e.twin_tree_node.is_valid() {
-                    swapped_twin = Some((e.twin_tree_node, e.twin_edge_idx));
-                }
-            }
-            let removed = node.skeleton.edges.pop().expect("swap_remove on empty");
-            (swapped_twin, removed)
-        };
-        if let Some((tt, tei)) = swapped_twin {
-            self.nodes[tt.idx()].skeleton.edges[tei as usize].twin_edge_idx = idx as u32;
-        }
-        removed
-    }
+    fn rebuild_with_merges(&mut self, absorbed_into: &[Option<TreeNodeId>]) {
+        let n = self.len();
 
-    fn merge_into_parent(&mut self, parent: TreeNodeId, child: TreeNodeId) {
-        let p_edge_idx = match self.nodes[parent.idx()]
-            .skeleton
-            .edges
-            .iter()
-            .position(|e| e.virtual_id != INVALID && e.twin_tree_node == child)
-        {
-            Some(x) => x,
-            None => return,
-        };
-        let c_edge_idx = match self.nodes[child.idx()]
-            .skeleton
-            .edges
-            .iter()
-            .position(|e| e.virtual_id != INVALID && e.twin_tree_node == parent)
-        {
-            Some(x) => x,
-            None => return,
-        };
-        let _ = self.swap_remove_skeleton_edge(parent, p_edge_idx);
-        let _ = self.swap_remove_skeleton_edge(child, c_edge_idx);
-        self.nodes[parent.idx()].children.retain(|&c| c != child);
-        let child_edges = std::mem::take(&mut self.nodes[child.idx()].skeleton.edges);
-        let child_n2o = std::mem::take(&mut self.nodes[child.idx()].skeleton.node_to_original);
-        let child_children = std::mem::take(&mut self.nodes[child.idx()].children);
-        let mut orig_to_parent: HashMap<u32, u32> = HashMap::new();
-        for (i, &orig) in self.nodes[parent.idx()]
-            .skeleton
-            .node_to_original
-            .iter()
-            .enumerate()
-        {
-            orig_to_parent.insert(orig.0, i as u32);
-        }
-        let mut child_local_to_parent: Vec<u32> = Vec::with_capacity(child_n2o.len());
-        {
-            let p_n2o = &mut self.nodes[parent.idx()].skeleton.node_to_original;
-            for &orig in &child_n2o {
-                let pid = if let Some(&pid) = orig_to_parent.get(&orig.0) {
-                    pid
-                } else {
-                    let pid = p_n2o.len() as u32;
-                    p_n2o.push(orig);
-                    orig_to_parent.insert(orig.0, pid);
-                    pid
-                };
-                child_local_to_parent.push(pid);
+        // Build mapping from old node ID to new node ID
+        let mut old_to_new: Vec<TreeNodeId> = vec![TreeNodeId::INVALID; n];
+        let mut new_idx = 0u32;
+        for i in 0..n {
+            if absorbed_into[i].is_none() {
+                old_to_new[i] = TreeNodeId(new_idx);
+                new_idx += 1;
             }
-            self.nodes[parent.idx()].skeleton.num_nodes = p_n2o.len() as u32;
         }
-        for mut e in child_edges {
-            e.src = NodeId(child_local_to_parent[e.src.idx()]);
-            e.dst = NodeId(child_local_to_parent[e.dst.idx()]);
-            if e.real_edge.is_valid() {
-                let eid = e.real_edge.idx();
-                if eid < self.edge_to_tree_node.len() {
-                    self.edge_to_tree_node[eid] = parent;
+
+        // For absorbed nodes, map to the node they were absorbed into
+        for i in 0..n {
+            if let Some(parent) = absorbed_into[i] {
+                old_to_new[i] = old_to_new[parent.idx()];
+            }
+        }
+
+        let new_count = new_idx as usize;
+        if new_count == n {
+            return; // Nothing absorbed
+        }
+
+        // ===== PASS 1: Count sizes for each new node =====
+        // Simple u32 arrays instead of Vec<Vec<T>> - much less memory!
+        let mut edge_counts: Vec<u32> = vec![0; new_count];
+        let mut child_counts: Vec<u32> = vec![0; new_count];
+        let mut mapping_counts: Vec<u32> = vec![0; new_count];
+
+        for i in 0..n {
+            let new_i = old_to_new[i].idx();
+
+            // Count edges (excluding virtual edges to merged nodes)
+            let edge_start = self.skeleton_offsets[i] as usize;
+            let edge_end = self.skeleton_offsets[i + 1] as usize;
+            for ei in edge_start..edge_end {
+                let e = &self.skeleton_edges[ei];
+                if e.twin_tree_node.is_valid() {
+                    let twin_new = old_to_new[e.twin_tree_node.idx()];
+                    if twin_new == TreeNodeId(new_i as u32) {
+                        continue; // Skip - virtual edge to merged node
+                    }
+                }
+                edge_counts[new_i] += 1;
+            }
+
+            // Count mappings (only for surviving nodes)
+            if absorbed_into[i].is_none() {
+                let map_len = self.node_mapping_offsets[i + 1] - self.node_mapping_offsets[i];
+                mapping_counts[new_i] = map_len;
+
+                // Count direct children
+                let cs = self.children_offsets[i] as usize;
+                let ce = self.children_offsets[i + 1] as usize;
+                for ci in cs..ce {
+                    let child = self.children[ci];
+                    if child.is_valid() && absorbed_into[child.idx()].is_none() {
+                        child_counts[new_i] += 1;
+                    }
                 }
             }
-            let is_virtual = e.virtual_id != INVALID;
-            let twin_tid = e.twin_tree_node;
-            let twin_ei = e.twin_edge_idx;
-            let new_idx = {
-                let p = &mut self.nodes[parent.idx()].skeleton.edges;
-                p.push(e);
-                (p.len() - 1) as u32
+        }
+
+        // Count children from absorbed nodes
+        for j in 0..n {
+            if let Some(parent_tid) = absorbed_into[j] {
+                let new_i = old_to_new[parent_tid.idx()].idx();
+                let cs = self.children_offsets[j] as usize;
+                let ce = self.children_offsets[j + 1] as usize;
+                for ci in cs..ce {
+                    let child = self.children[ci];
+                    if child.is_valid() && absorbed_into[child.idx()].is_none() {
+                        child_counts[new_i] += 1;
+                    }
+                }
+            }
+        }
+
+        // ===== PASS 2: Build offset arrays =====
+        let total_edges: usize = edge_counts.iter().map(|&x| x as usize).sum();
+        let total_children: usize = child_counts.iter().map(|&x| x as usize).sum();
+        let total_mapping: usize = mapping_counts.iter().map(|&x| x as usize).sum();
+
+        let mut new_skeleton_offsets: Vec<u32> = Vec::with_capacity(new_count + 1);
+        let mut new_children_offsets: Vec<u32> = Vec::with_capacity(new_count + 1);
+        let mut new_mapping_offsets: Vec<u32> = Vec::with_capacity(new_count + 1);
+
+        new_skeleton_offsets.push(0);
+        new_children_offsets.push(0);
+        new_mapping_offsets.push(0);
+
+        for i in 0..new_count {
+            new_skeleton_offsets.push(new_skeleton_offsets[i] + edge_counts[i]);
+            new_children_offsets.push(new_children_offsets[i] + child_counts[i]);
+            new_mapping_offsets.push(new_mapping_offsets[i] + mapping_counts[i]);
+        }
+
+        // ===== PASS 3: Allocate final arrays with exact sizes =====
+        let mut new_node_types: Vec<SpqrNodeType> = vec![SpqrNodeType::R; new_count];
+        let mut new_node_parents: Vec<TreeNodeId> = vec![TreeNodeId::INVALID; new_count];
+        let mut new_skeleton_num_nodes: Vec<u32> = vec![0; new_count];
+        let mut new_skeleton_edges: Vec<SkeletonEdge> = vec![SkeletonEdge::default(); total_edges];
+        let mut new_children: Vec<TreeNodeId> = vec![TreeNodeId::INVALID; total_children];
+        let mut new_node_mapping: Vec<NodeId> = vec![NodeId::INVALID; total_mapping];
+
+        // Track write positions
+        let mut edge_write_pos: Vec<u32> = new_skeleton_offsets[..new_count].to_vec();
+        let mut child_write_pos: Vec<u32> = new_children_offsets[..new_count].to_vec();
+
+        // ===== PASS 4: Fill data =====
+        for i in 0..n {
+            if absorbed_into[i].is_some() {
+                continue;
+            }
+
+            let new_i = old_to_new[i].idx();
+
+            // Node info
+            new_node_types[new_i] = self.node_types[i];
+            let parent = self.node_parents[i];
+            new_node_parents[new_i] = if parent.is_valid() {
+                old_to_new[parent.idx()]
+            } else {
+                TreeNodeId::INVALID
             };
-            if is_virtual && twin_tid.is_valid() {
-                self.nodes[twin_tid.idx()].skeleton.edges[twin_ei as usize].twin_tree_node = parent;
-                self.nodes[twin_tid.idx()].skeleton.edges[twin_ei as usize].twin_edge_idx = new_idx;
+            new_skeleton_num_nodes[new_i] = self.skeleton_num_nodes[i];
+
+            // Copy node mapping directly
+            let map_start = self.node_mapping_offsets[i] as usize;
+            let map_end = self.node_mapping_offsets[i + 1] as usize;
+            let new_map_start = new_mapping_offsets[new_i] as usize;
+            for (j, &val) in self.node_mapping[map_start..map_end].iter().enumerate() {
+                new_node_mapping[new_map_start + j] = val;
+            }
+
+            // Copy direct children
+            let cs = self.children_offsets[i] as usize;
+            let ce = self.children_offsets[i + 1] as usize;
+            for ci in cs..ce {
+                let child = self.children[ci];
+                if child.is_valid() && absorbed_into[child.idx()].is_none() {
+                    let pos = child_write_pos[new_i] as usize;
+                    new_children[pos] = old_to_new[child.idx()];
+                    child_write_pos[new_i] += 1;
+                }
             }
         }
-        for g in child_children {
-            self.nodes[g.idx()].parent = parent;
-            self.nodes[parent.idx()].children.push(g);
+
+        // Copy children from absorbed nodes
+        for j in 0..n {
+            if let Some(parent_tid) = absorbed_into[j] {
+                let new_i = old_to_new[parent_tid.idx()].idx();
+                let cs = self.children_offsets[j] as usize;
+                let ce = self.children_offsets[j + 1] as usize;
+                for ci in cs..ce {
+                    let child = self.children[ci];
+                    if child.is_valid() && absorbed_into[child.idx()].is_none() {
+                        let pos = child_write_pos[new_i] as usize;
+                        new_children[pos] = old_to_new[child.idx()];
+                        child_write_pos[new_i] += 1;
+                    }
+                }
+            }
         }
-        self.nodes[child.idx()].parent = TreeNodeId::INVALID;
-        self.nodes[child.idx()].skeleton.num_nodes = 0;
+
+        // Copy edges from all nodes (including absorbed)
+        for i in 0..n {
+            let new_i = old_to_new[i].idx();
+            let edge_start = self.skeleton_offsets[i] as usize;
+            let edge_end = self.skeleton_offsets[i + 1] as usize;
+
+            for ei in edge_start..edge_end {
+                let mut e = self.skeleton_edges[ei];
+
+                if e.twin_tree_node.is_valid() {
+                    let twin_new = old_to_new[e.twin_tree_node.idx()];
+                    if twin_new == TreeNodeId(new_i as u32) {
+                        continue; // Skip merged virtual edge
+                    }
+                    e.twin_tree_node = twin_new;
+                }
+
+                let pos = edge_write_pos[new_i] as usize;
+                new_skeleton_edges[pos] = e;
+                edge_write_pos[new_i] += 1;
+            }
+        }
+
+        // Update edge_to_tree_node
+        for tn in &mut self.edge_to_tree_node {
+            if tn.is_valid() {
+                *tn = old_to_new[tn.idx()];
+            }
+        }
+
+        // Update root
+        if self.root.is_valid() {
+            self.root = old_to_new[self.root.idx()];
+        }
+
+        // Replace arrays
+        self.node_types = new_node_types;
+        self.node_parents = new_node_parents;
+        self.skeleton_offsets = new_skeleton_offsets;
+        self.skeleton_edges = new_skeleton_edges;
+        self.node_mapping_offsets = new_mapping_offsets;
+        self.node_mapping = new_node_mapping;
+        self.skeleton_num_nodes = new_skeleton_num_nodes;
+        self.children_offsets = new_children_offsets;
+        self.children = new_children;
     }
 
     pub fn compact(&mut self) {
-        let mut id_map = vec![TreeNodeId::INVALID; self.nodes.len()];
-        let mut new_n: Vec<SpqrTreeNode> = Vec::new();
-        for (i, nd) in self.nodes.iter().enumerate() {
-            if !nd.skeleton.edges.is_empty() {
-                id_map[i] = TreeNodeId(new_n.len() as u32);
-                new_n.push(nd.clone());
+        let n = self.len();
+        if n == 0 {
+            return;
+        }
+
+        // Find nodes with edges (non-empty)
+        let mut is_alive: Vec<bool> = vec![false; n];
+        for i in 0..n {
+            let num_edges = self.skeleton_offsets[i + 1] - self.skeleton_offsets[i];
+            is_alive[i] = num_edges > 0;
+        }
+
+        // Build mapping from old to new IDs
+        let mut old_to_new: Vec<TreeNodeId> = vec![TreeNodeId::INVALID; n];
+        let mut new_idx = 0u32;
+        for i in 0..n {
+            if is_alive[i] {
+                old_to_new[i] = TreeNodeId(new_idx);
+                new_idx += 1;
             }
         }
-        for nd in &mut new_n {
-            if nd.parent.is_valid() {
-                nd.parent = id_map[nd.parent.idx()];
+
+        if new_idx as usize == n {
+            // No compaction needed
+            return;
+        }
+
+        let new_count = new_idx as usize;
+
+        // Build new arrays
+        let mut new_node_types: Vec<SpqrNodeType> = Vec::with_capacity(new_count);
+        let mut new_node_parents: Vec<TreeNodeId> = Vec::with_capacity(new_count);
+        let mut new_skeleton_num_nodes: Vec<u32> = Vec::with_capacity(new_count);
+        let mut new_skeleton_offsets: Vec<u32> = vec![0];
+        let mut new_skeleton_edges: Vec<SkeletonEdge> = Vec::new();
+        let mut new_node_mapping_offsets: Vec<u32> = vec![0];
+        let mut new_node_mapping: Vec<NodeId> = Vec::new();
+        let mut new_children_offsets: Vec<u32> = vec![0];
+        let mut new_children: Vec<TreeNodeId> = Vec::new();
+
+        for i in 0..n {
+            if !is_alive[i] {
+                continue;
             }
-            nd.children = nd
-                .children
-                .iter()
-                .filter_map(|c| {
-                    let m = id_map[c.idx()];
-                    if m.is_valid() {
-                        Some(m)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            for e in &mut nd.skeleton.edges {
+
+            new_node_types.push(self.node_types[i]);
+
+            let parent = self.node_parents[i];
+            new_node_parents.push(if parent.is_valid() {
+                old_to_new[parent.idx()]
+            } else {
+                TreeNodeId::INVALID
+            });
+
+            new_skeleton_num_nodes.push(self.skeleton_num_nodes[i]);
+
+            // Copy skeleton edges, updating twin references
+            let edge_start = self.skeleton_offsets[i] as usize;
+            let edge_end = self.skeleton_offsets[i + 1] as usize;
+            for ei in edge_start..edge_end {
+                let mut e = self.skeleton_edges[ei];
                 if e.twin_tree_node.is_valid() {
-                    e.twin_tree_node = id_map[e.twin_tree_node.idx()];
+                    e.twin_tree_node = old_to_new[e.twin_tree_node.idx()];
+                }
+                new_skeleton_edges.push(e);
+            }
+            new_skeleton_offsets.push(new_skeleton_edges.len() as u32);
+
+            // Copy node mapping
+            let map_start = self.node_mapping_offsets[i] as usize;
+            let map_end = self.node_mapping_offsets[i + 1] as usize;
+            new_node_mapping.extend_from_slice(&self.node_mapping[map_start..map_end]);
+            new_node_mapping_offsets.push(new_node_mapping.len() as u32);
+
+            // Copy children, filtering out dead nodes
+            let children_start = self.children_offsets[i] as usize;
+            let children_end = self.children_offsets[i + 1] as usize;
+            for ci in children_start..children_end {
+                let child = self.children[ci];
+                if child.is_valid() && is_alive[child.idx()] {
+                    new_children.push(old_to_new[child.idx()]);
                 }
             }
+            new_children_offsets.push(new_children.len() as u32);
         }
+
+        // Update edge_to_tree_node
         for tn in &mut self.edge_to_tree_node {
-            if tn.is_valid() {
-                *tn = id_map[tn.idx()];
+            if tn.is_valid() && old_to_new[tn.idx()].is_valid() {
+                *tn = old_to_new[tn.idx()];
+            } else if tn.is_valid() {
+                *tn = TreeNodeId::INVALID;
             }
         }
-        self.root = if self.root.is_valid() {
-            id_map[self.root.idx()]
-        } else {
-            TreeNodeId::INVALID
-        };
-        self.nodes = new_n;
+
+        // Update root
+        if self.root.is_valid() {
+            self.root = old_to_new[self.root.idx()];
+        }
+
+        // Replace arrays
+        self.node_types = new_node_types;
+        self.node_parents = new_node_parents;
+        self.skeleton_num_nodes = new_skeleton_num_nodes;
+        self.skeleton_offsets = new_skeleton_offsets;
+        self.skeleton_edges = new_skeleton_edges;
+        self.node_mapping_offsets = new_node_mapping_offsets;
+        self.node_mapping = new_node_mapping;
+        self.children_offsets = new_children_offsets;
+        self.children = new_children;
     }
 }
 
 impl fmt::Display for SpqrTree {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "SPQR Tree ({} nodes):", self.nodes.len())?;
-        for (i, nd) in self.nodes.iter().enumerate() {
-            let t = match nd.node_type {
+        writeln!(f, "SPQR Tree ({} nodes):", self.len())?;
+        for i in 0..self.len() {
+            let t = match self.node_types[i] {
                 SpqrNodeType::S => "S",
                 SpqrNodeType::P => "P",
                 SpqrNodeType::R => "R",
             };
+            let num_edges = self.skeleton_offsets[i + 1] - self.skeleton_offsets[i];
+            let num_children = self.children_offsets[i + 1] - self.children_offsets[i];
+            let map_start = self.node_mapping_offsets[i] as usize;
+            let map_end = self.node_mapping_offsets[i + 1] as usize;
+            let poles = if map_end - map_start >= 2 {
+                (
+                    self.node_mapping[map_start],
+                    self.node_mapping[map_start + 1],
+                )
+            } else {
+                (NodeId::INVALID, NodeId::INVALID)
+            };
             writeln!(
                 f,
                 "  [{}] {}: {} edges, {} children, poles={:?}",
-                i,
-                t,
-                nd.skeleton.num_edges(),
-                nd.children.len(),
-                if nd.skeleton.node_to_original.len() >= 2 {
-                    nd.skeleton.poles()
-                } else {
-                    (NodeId::INVALID, NodeId::INVALID)
-                }
+                i, t, num_edges, num_children, poles
             )?;
         }
         Ok(())
@@ -2009,7 +2620,7 @@ mod tests {
     #[test]
     fn test_bond() {
         let t = build_spqr_tree(&make_bond());
-        assert_eq!(t.nodes[0].node_type, SpqrNodeType::P);
+        assert_eq!(t.node_types[0], SpqrNodeType::P);
     }
     #[test]
     fn test_cycle() {
@@ -2125,7 +2736,7 @@ mod tests {
         let res = build_spqr(&g);
         assert_eq!(res.self_loops.len(), 3);
         assert_eq!(res.tree.len(), 1);
-        assert_eq!(res.tree.nodes[0].node_type, SpqrNodeType::P);
+        assert_eq!(res.tree.node_types[0], SpqrNodeType::P);
         assert!(res.tree.tree_node_of_edge(EdgeId(0)).is_valid());
         assert!(res.tree.tree_node_of_edge(EdgeId(1)).is_valid());
         assert!(!res.tree.tree_node_of_edge(EdgeId(2)).is_valid());
@@ -2136,5 +2747,60 @@ mod tests {
         let g = make_k4();
         let t = build_spqr_tree(&g);
         assert!(!t.is_empty());
+    }
+
+    #[test]
+    fn test_graph_from_edge_pairs() {
+        // K4 as flat pairs
+        let pairs: Vec<u32> = vec![0, 1, 0, 2, 0, 3, 1, 2, 1, 3, 2, 3];
+        let g = Graph::from_edge_pairs(4, &pairs);
+        assert_eq!(g.num_nodes(), 4);
+        assert_eq!(g.num_edges(), 6);
+
+        // Verify the graph works with SPQR
+        let t = build_spqr_tree(&g);
+        let (_, _, r) = t.count_by_type();
+        assert!(r >= 1, "K4 needs R-node");
+    }
+
+    #[test]
+    fn test_graph_from_edge_arrays() {
+        let src: Vec<u32> = vec![0, 0, 0, 1, 1, 2];
+        let dst: Vec<u32> = vec![1, 2, 3, 2, 3, 3];
+        let g = Graph::from_edge_arrays(4, &src, &dst);
+        assert_eq!(g.num_nodes(), 4);
+        assert_eq!(g.num_edges(), 6);
+
+        // Verify same result as make_k4
+        let t = build_spqr_tree(&g);
+        let (_, _, r) = t.count_by_type();
+        assert!(r >= 1, "K4 needs R-node");
+    }
+
+    #[test]
+    fn test_graph_construction_equivalence() {
+        // Build same graph three ways
+        let g1 = make_k4();
+
+        let pairs: Vec<u32> = vec![0, 1, 0, 2, 0, 3, 1, 2, 1, 3, 2, 3];
+        let g2 = Graph::from_edge_pairs(4, &pairs);
+
+        let src: Vec<u32> = vec![0, 0, 0, 1, 1, 2];
+        let dst: Vec<u32> = vec![1, 2, 3, 2, 3, 3];
+        let g3 = Graph::from_edge_arrays(4, &src, &dst);
+
+        // All should have same structure
+        assert_eq!(g1.num_nodes(), g2.num_nodes());
+        assert_eq!(g1.num_nodes(), g3.num_nodes());
+        assert_eq!(g1.num_edges(), g2.num_edges());
+        assert_eq!(g1.num_edges(), g3.num_edges());
+
+        // All should produce valid SPQR trees
+        let t1 = build_spqr_tree(&g1);
+        let t2 = build_spqr_tree(&g2);
+        let t3 = build_spqr_tree(&g3);
+
+        assert_eq!(t1.len(), t2.len());
+        assert_eq!(t1.len(), t3.len());
     }
 }
