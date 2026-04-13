@@ -11,8 +11,8 @@
 
 use rand::prelude::*;
 use rand::SeedableRng;
-use spqr_tree_building::verify::{verify_spqr_tree_with_options, VerifyOptions};
-use spqr_tree_building::*;
+use spqr_rust::verify::{verify_spqr_tree_with_options, VerifyOptions};
+use spqr_rust::*;
 
 fn env_count(var: &str, default: usize) -> usize {
     std::env::var(var)
@@ -410,4 +410,57 @@ fn brute_force_large_with_self_loops() {
         );
     }
     eprintln!("brute_force_large_with_self_loops: {} passed", count);
+}
+
+/// Verify .spqr format
+fn check_spqr_format(g: &Graph, label: &str) {
+    use spqr_rust::spqr_format::{parse_spqr_format, to_spqr_string, validate_spqr_format};
+
+    let res = spqr_rust::build_spqr(g);
+    let s = to_spqr_string(g, &res);
+    let parsed = parse_spqr_format(&s)
+        .unwrap_or_else(|e| panic!("[{}] Failed to parse .spqr format: {}\n\n{}", label, e, s));
+    if let Err(errors) = validate_spqr_format(&parsed, g, &res) {
+        panic!(
+            "[{}] Format validation failed:\n  {}\n\nGenerated format:\n{}",
+            label,
+            errors.join("\n  "),
+            s
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn brute_force_spqr_format_random() {
+    let count = env_count("SPQR_NUM_RANDOM", 10_000);
+    let mut rng = StdRng::seed_from_u64(0xF0F0_F0F0);
+    for i in 0..count {
+        let n = rng.gen_range(2..=50);
+        let extra = rng.gen_range(0..=80);
+        let g = random_biconnected_multigraph(&mut rng, n, extra);
+        check_spqr_format(
+            &g,
+            &format!("format#{} n={} m={}", i, g.num_nodes(), g.num_edges()),
+        );
+    }
+    eprintln!("brute_force_spqr_format_random: {} passed", count);
+}
+
+#[test]
+#[ignore]
+fn brute_force_spqr_format_with_self_loops() {
+    let count = env_count("SPQR_NUM_RANDOM", 10_000);
+    let mut rng = StdRng::seed_from_u64(0xABCD_EF01);
+    for i in 0..count {
+        let n = rng.gen_range(2..=50);
+        let extra = rng.gen_range(0..=60);
+        let loops = rng.gen_range(0..=20);
+        let g = random_biconnected_multigraph_with_self_loops(&mut rng, n, extra, loops);
+        check_spqr_format(
+            &g,
+            &format!("format_sl#{} n={} m={}", i, g.num_nodes(), g.num_edges()),
+        );
+    }
+    eprintln!("brute_force_spqr_format_with_self_loops: {} passed", count);
 }
