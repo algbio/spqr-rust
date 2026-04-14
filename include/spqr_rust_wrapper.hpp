@@ -15,6 +15,14 @@
 
 namespace spqr_rust {
 
+using node = uint32_t;
+using edge = uint32_t;
+using tree_node = uint32_t;
+
+constexpr node INVALID_NODE = SPQR_INVALID;
+constexpr edge INVALID_EDGE = SPQR_INVALID;
+constexpr tree_node INVALID_TREE_NODE = SPQR_INVALID;
+
 class RustGraph;
 class RustSPQRTree;
 class RustBCTree;
@@ -27,7 +35,7 @@ public:
         if (!ptr_) throw std::bad_alloc();
     }
 
-    static RustGraph fromRaw(Graph* ptr) {
+    static RustGraph fromRaw(SpqrGraphFFI* ptr) {
         RustGraph g;
         spqr_graph_free(g.ptr_);
         g.ptr_ = ptr;
@@ -35,20 +43,20 @@ public:
     }
 
     static RustGraph fromEdges(uint32_t numNodes, const uint32_t* edges, uint32_t numEdges) {
-        Graph* g = spqr_graph_from_edges(numNodes, edges, numEdges);
+        SpqrGraphFFI* g = spqr_graph_from_edges(numNodes, edges, numEdges);
         if (!g) throw std::bad_alloc();
         return fromRaw(g);
     }
 
-    static RustGraph fromArrays(uint32_t numNodes, const uint32_t* src, 
-                                 const uint32_t* dst, uint32_t numEdges) {
-        Graph* g = spqr_graph_from_arrays(numNodes, src, dst, numEdges);
+    static RustGraph fromArrays(uint32_t numNodes, const node* src, 
+                                 const node* dst, uint32_t numEdges) {
+        SpqrGraphFFI* g = spqr_graph_from_arrays(numNodes, src, dst, numEdges);
         if (!g) throw std::bad_alloc();
         return fromRaw(g);
     }
 
-    static RustGraph fromVectors(const std::vector<uint32_t>& src,
-                                  const std::vector<uint32_t>& dst,
+    static RustGraph fromVectors(const std::vector<node>& src,
+                                  const std::vector<node>& dst,
                                   uint32_t numNodes) {
         if (src.size() != dst.size()) throw std::invalid_argument("src and dst must have same size");
         return fromArrays(numNodes, src.data(), dst.data(), static_cast<uint32_t>(src.size()));
@@ -70,16 +78,20 @@ public:
     RustGraph(const RustGraph&) = delete;
     RustGraph& operator=(const RustGraph&) = delete;
 
-    uint32_t addNodes(uint32_t count) {
+    node addNodes(uint32_t count) {
         return spqr_graph_add_nodes(ptr_, count);
     }
+    
+    node addNode() {
+        return spqr_graph_add_nodes(ptr_, 1);
+    }
 
-    uint32_t addEdge(uint32_t u, uint32_t v) {
+    edge addEdge(node u, node v) {
         return spqr_graph_add_edge(ptr_, u, v);
     }
 
-    void addEdgesBatch(const std::vector<std::pair<uint32_t, uint32_t>>& edges) {
-        static_assert(sizeof(std::pair<uint32_t, uint32_t>) == 2 * sizeof(uint32_t),
+    void addEdgesBatch(const std::vector<std::pair<node, node>>& edges) {
+        static_assert(sizeof(std::pair<node, node>) == 2 * sizeof(uint32_t),
                       "pair layout must be compact");
         spqr_graph_add_edges_batch(ptr_, 
             reinterpret_cast<const uint32_t*>(edges.data()), 
@@ -90,7 +102,7 @@ public:
         spqr_graph_add_edges_batch(ptr_, edges, count);
     }
 
-    void addEdgesBatchArrays(const uint32_t* src, const uint32_t* dst, uint32_t count) {
+    void addEdgesBatchArrays(const node* src, const node* dst, uint32_t count) {
         for (uint32_t i = 0; i < count; ++i) {
             spqr_graph_add_edge(ptr_, src[i], dst[i]);
         }
@@ -98,33 +110,35 @@ public:
 
     uint32_t numNodes() const { return spqr_graph_num_nodes(ptr_); }
     uint32_t numEdges() const { return spqr_graph_num_edges(ptr_); }
-    uint32_t edgeSrc(uint32_t edgeId) const { return spqr_graph_edge_src(ptr_, edgeId); }
-    uint32_t edgeDst(uint32_t edgeId) const { return spqr_graph_edge_dst(ptr_, edgeId); }
-    uint32_t degree(uint32_t node) const { return spqr_graph_degree(ptr_, node); }
+    node edgeSrc(edge e) const { return spqr_graph_edge_src(ptr_, e); }
+    node edgeDst(edge e) const { return spqr_graph_edge_dst(ptr_, e); }
+    uint32_t degree(node v) const { return spqr_graph_degree(ptr_, v); }
 
-    uint32_t adjCursor(uint32_t node) const {
-        return spqr_graph_adj_cursor(ptr_, node);
+    uint32_t adjCursor(node v) const {
+        return spqr_graph_adj_cursor(ptr_, v);
     }
 
-    bool adjNext(uint32_t cursor, uint32_t& neighbor, uint32_t& edge, uint32_t& nextCursor) const {
-        return spqr_graph_adj_next(ptr_, cursor, &neighbor, &edge, &nextCursor);
+    bool adjNext(uint32_t cursor, node& neighbor, edge& e, uint32_t& nextCursor) const {
+        return spqr_graph_adj_next(ptr_, cursor, &neighbor, &e, &nextCursor);
     }
 
     template<typename F>
-    void forEachNeighbor(uint32_t node, F&& callback) const {
-        uint32_t cursor = spqr_graph_adj_cursor(ptr_, node);
-        uint32_t neighbor, edge, next;
-        while (spqr_graph_adj_next(ptr_, cursor, &neighbor, &edge, &next)) {
-            callback(neighbor, edge);
+    void forEachNeighbor(node v, F&& callback) const {
+        uint32_t cursor = spqr_graph_adj_cursor(ptr_, v);
+        node neighbor;
+        edge e;
+        uint32_t next;
+        while (spqr_graph_adj_next(ptr_, cursor, &neighbor, &e, &next)) {
+            callback(neighbor, e);
             cursor = next;
         }
     }
 
-    Graph* raw() { return ptr_; }
-    const Graph* raw() const { return ptr_; }
+    SpqrGraphFFI* raw() { return ptr_; }
+    const SpqrGraphFFI* raw() const { return ptr_; }
 
 private:
-    Graph* ptr_;
+    SpqrGraphFFI* ptr_;
 };
 
 /**
@@ -155,55 +169,55 @@ public:
 
     const SpqrTree* tree() const { return spqr_result_tree(result_); }
 
-    std::vector<uint32_t> selfLoops() const {
+    std::vector<edge> selfLoops() const {
         uint32_t len;
         const uint32_t* data = spqr_result_self_loops(result_, &len);
-        return std::vector<uint32_t>(data, data + len);
+        return std::vector<edge>(data, data + len);
     }
 
     uint32_t treeLen() const { return spqr_tree_len(tree()); }
-    uint32_t treeRoot() const { return spqr_tree_root(tree()); }
+    tree_node treeRoot() const { return spqr_tree_root(tree()); }
 
-    SPQRNodeType nodeType(uint32_t nodeId) const {
-        return static_cast<SPQRNodeType>(spqr_tree_node_type(tree(), nodeId));
+    SPQRNodeType nodeType(tree_node tn) const {
+        return static_cast<SPQRNodeType>(spqr_tree_node_type(tree(), tn));
     }
 
-    uint32_t nodeParent(uint32_t nodeId) const {
-        return spqr_tree_node_parent(tree(), nodeId);
+    tree_node nodeParent(tree_node tn) const {
+        return spqr_tree_node_parent(tree(), tn);
     }
 
-    std::vector<uint32_t> nodeChildren(uint32_t nodeId) const {
+    std::vector<tree_node> nodeChildren(tree_node tn) const {
         uint32_t len;
-        const uint32_t* data = spqr_tree_node_children(tree(), nodeId, &len);
-        return std::vector<uint32_t>(data, data + len);
+        const uint32_t* data = spqr_tree_node_children(tree(), tn, &len);
+        return std::vector<tree_node>(data, data + len);
     }
 
-    uint32_t skeletonNumEdges(uint32_t nodeId) const {
-        return spqr_tree_skeleton_num_edges(tree(), nodeId);
+    uint32_t skeletonNumEdges(tree_node tn) const {
+        return spqr_tree_skeleton_num_edges(tree(), tn);
     }
 
-    uint32_t skeletonNumNodes(uint32_t nodeId) const {
-        return spqr_tree_skeleton_num_nodes(tree(), nodeId);
+    uint32_t skeletonNumNodes(tree_node tn) const {
+        return spqr_tree_skeleton_num_nodes(tree(), tn);
     }
 
-    std::pair<uint32_t, uint32_t> skeletonPoles(uint32_t nodeId) const {
-        uint32_t p1, p2;
-        spqr_tree_skeleton_poles(tree(), nodeId, &p1, &p2);
+    std::pair<node, node> skeletonPoles(tree_node tn) const {
+        node p1, p2;
+        spqr_tree_skeleton_poles(tree(), tn, &p1, &p2);
         return {p1, p2};
     }
 
-    SkeletonEdgeInfo skeletonEdge(uint32_t nodeId, uint32_t edgeIdx) const {
+    SkeletonEdgeInfo skeletonEdge(tree_node tn, uint32_t edgeIdx) const {
         SkeletonEdgeInfo info;
-        spqr_tree_skeleton_edge(tree(), nodeId, edgeIdx, &info);
+        spqr_tree_skeleton_edge(tree(), tn, edgeIdx, &info);
         return info;
     }
 
-    uint32_t skeletonOriginalNode(uint32_t treeNodeId, uint32_t localNode) const {
-        return spqr_tree_skeleton_original_node(tree(), treeNodeId, localNode);
+    node skeletonOriginalNode(tree_node tn, uint32_t localNode) const {
+        return spqr_tree_skeleton_original_node(tree(), tn, localNode);
     }
 
-    uint32_t nodeOfEdge(uint32_t edgeId) const {
-        return spqr_tree_node_of_edge(tree(), edgeId);
+    tree_node nodeOfEdge(edge e) const {
+        return spqr_tree_node_of_edge(tree(), e);
     }
 
     void countByType(uint32_t& sCount, uint32_t& pCount, uint32_t& rCount) const {
@@ -372,31 +386,31 @@ public:
     uint32_t numBlocks() const { return spqr_bc_num_blocks(bc_); }
     uint32_t numCutVertices() const { return spqr_bc_num_cut_vertices(bc_); }
     bool isBiconnected() const { return spqr_bc_is_biconnected(bc_); }
-    bool isCutVertex(uint32_t node) const { return spqr_bc_is_cut_vertex(bc_, node); }
+    bool isCutVertex(node v) const { return spqr_bc_is_cut_vertex(bc_, v); }
 
-    std::vector<uint32_t> blockNodes(uint32_t blockIdx) const {
+    std::vector<node> blockNodes(uint32_t blockIdx) const {
         uint32_t len;
         const uint32_t* data = spqr_bc_block_nodes(bc_, blockIdx, &len);
-        return std::vector<uint32_t>(data, data + len);
+        return std::vector<node>(data, data + len);
     }
 
-    std::vector<uint32_t> blockEdges(uint32_t blockIdx) const {
+    std::vector<edge> blockEdges(uint32_t blockIdx) const {
         uint32_t len;
         const uint32_t* data = spqr_bc_block_edges(bc_, blockIdx, &len);
-        return std::vector<uint32_t>(data, data + len);
+        return std::vector<edge>(data, data + len);
     }
 
-    std::vector<uint32_t> cutVertices() const {
+    std::vector<node> cutVertices() const {
         uint32_t len;
         const uint32_t* data = spqr_bc_cut_vertices(bc_, &len);
-        return std::vector<uint32_t>(data, data + len);
+        return std::vector<node>(data, data + len);
     }
 
-    BCTree* raw() { return bc_; }
-    const BCTree* raw() const { return bc_; }
+    SpqrBCTreeFFI* raw() { return bc_; }
+    const SpqrBCTreeFFI* raw() const { return bc_; }
 
 private:
-    BCTree* bc_;
+    SpqrBCTreeFFI* bc_;
 };
 
 
@@ -475,15 +489,14 @@ public:
 
     uint32_t count() const { return spqr_cc_count(cc_); }
 
-    uint32_t componentOf(uint32_t node) const {
-        return spqr_cc_component_of(cc_, node);
+    uint32_t componentOf(node v) const {
+        return spqr_cc_component_of(cc_, v);
     }
 
     uint32_t countIn(uint32_t componentId) const {
         return spqr_cc_count_in(cc_, componentId);
     }
 
-    /** Get raw component array (zero-copy) */
     std::pair<const uint32_t*, uint32_t> componentsRaw() const {
         uint32_t len;
         const uint32_t* data = spqr_cc_components_raw(cc_, &len);
@@ -491,7 +504,7 @@ public:
     }
 
 private:
-    CCResult* cc_;
+    SpqrCCResult* cc_;
 };
 
 
@@ -508,4 +521,4 @@ inline RustConnectedComponents computeCC(const RustGraph& graph) {
 }
 
 }
-#endif 
+#endif

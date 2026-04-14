@@ -20,9 +20,9 @@ extern "C" {
 #define SPQR_NODE_TYPE_P 1
 #define SPQR_NODE_TYPE_R 2
 
-typedef struct Graph Graph;
-typedef struct CCResult CCResult;
-typedef struct BCTree BCTree;
+typedef struct SpqrGraphFFI SpqrGraphFFI;
+typedef struct SpqrCCResult SpqrCCResult;
+typedef struct SpqrBCTreeFFI SpqrBCTreeFFI;
 typedef struct SpqrResult SpqrResult;
 typedef struct SpqrTree SpqrTree;
 
@@ -44,30 +44,30 @@ typedef struct SkeletonEdgeInfo {
 } SkeletonEdgeInfo;
 
 
-Graph* spqr_graph_new(uint32_t node_capacity, uint32_t edge_capacity);
-void spqr_graph_free(Graph* graph);
+SpqrGraphFFI* spqr_graph_new(uint32_t node_capacity, uint32_t edge_capacity);
+void spqr_graph_free(SpqrGraphFFI* graph);
 
 // returns ID of first added node
-uint32_t spqr_graph_add_nodes(Graph* graph, uint32_t count);
-uint32_t spqr_graph_add_edge(Graph* graph, uint32_t u, uint32_t v);
+uint32_t spqr_graph_add_nodes(SpqrGraphFFI* graph, uint32_t count);
+uint32_t spqr_graph_add_edge(SpqrGraphFFI* graph, uint32_t u, uint32_t v);
 
 // edges array contains pairs like: [u0, v0, u1, v1, ..]
-void spqr_graph_add_edges_batch(Graph* graph, const uint32_t* edges, uint32_t count);
-Graph* spqr_graph_from_edges(uint32_t num_nodes, const uint32_t* edges, uint32_t num_edges);
+void spqr_graph_add_edges_batch(SpqrGraphFFI* graph, const uint32_t* edges, uint32_t count);
+SpqrGraphFFI* spqr_graph_from_edges(uint32_t num_nodes, const uint32_t* edges, uint32_t num_edges);
 
-Graph* spqr_graph_from_arrays(uint32_t num_nodes,
+SpqrGraphFFI* spqr_graph_from_arrays(uint32_t num_nodes,
                               const uint32_t* src,
                               const uint32_t* dst,
                               uint32_t num_edges);
 
-uint32_t spqr_graph_num_nodes(const Graph* graph);
-uint32_t spqr_graph_num_edges(const Graph* graph);
-uint32_t spqr_graph_edge_src(const Graph* graph, uint32_t edge_id);
-uint32_t spqr_graph_edge_dst(const Graph* graph, uint32_t edge_id);
-uint32_t spqr_graph_degree(const Graph* graph, uint32_t node);
+uint32_t spqr_graph_num_nodes(const SpqrGraphFFI* graph);
+uint32_t spqr_graph_num_edges(const SpqrGraphFFI* graph);
+uint32_t spqr_graph_edge_src(const SpqrGraphFFI* graph, uint32_t edge_id);
+uint32_t spqr_graph_edge_dst(const SpqrGraphFFI* graph, uint32_t edge_id);
+uint32_t spqr_graph_degree(const SpqrGraphFFI* graph, uint32_t node);
 
-uint32_t spqr_graph_adj_cursor(const Graph* graph, uint32_t node);
-bool spqr_graph_adj_next(const Graph* graph,
+uint32_t spqr_graph_adj_cursor(const SpqrGraphFFI* graph, uint32_t node);
+bool spqr_graph_adj_next(const SpqrGraphFFI* graph,
                          uint32_t cursor,
                          uint32_t* out_neighbor,
                          uint32_t* out_edge,
@@ -75,12 +75,12 @@ bool spqr_graph_adj_next(const Graph* graph,
 
 typedef bool (*NeighborCallback)(uint32_t neighbor_node, uint32_t edge_id, void* user_data);
 
-void spqr_graph_for_each_neighbor(const Graph* graph,
+void spqr_graph_for_each_neighbor(const SpqrGraphFFI* graph,
                                   uint32_t node,
                                   NeighborCallback callback,
                                   void* user_data);
 
-uint32_t spqr_graph_neighbors_to_buffer(const Graph* graph,
+uint32_t spqr_graph_neighbors_to_buffer(const SpqrGraphFFI* graph,
                                         uint32_t node,
                                         uint32_t* nodes_out,
                                         uint32_t* edges_out,
@@ -88,35 +88,35 @@ uint32_t spqr_graph_neighbors_to_buffer(const Graph* graph,
 
 // CC
 
-CCResult* spqr_connected_components(const Graph* graph);
-void spqr_cc_free(CCResult* cc);
-uint32_t spqr_cc_count(const CCResult* cc);
-uint32_t spqr_cc_component_of(const CCResult* cc, uint32_t node);
+SpqrCCResult* spqr_connected_components(const SpqrGraphFFI* graph);
+void spqr_cc_free(SpqrCCResult* cc);
+uint32_t spqr_cc_count(const SpqrCCResult* cc);
+uint32_t spqr_cc_component_of(const SpqrCCResult* cc, uint32_t node);
 
 // raw pointer, valid until cc freed
-const uint32_t* spqr_cc_components_raw(const CCResult* cc, uint32_t* out_len);
+const uint32_t* spqr_cc_components_raw(const SpqrCCResult* cc, uint32_t* out_len);
 
-uint32_t spqr_cc_count_in(const CCResult* cc, uint32_t component_id);
+uint32_t spqr_cc_count_in(const SpqrCCResult* cc, uint32_t component_id);
 
 typedef bool (*NodeCallback)(uint32_t node_id, void* user_data);
 
-void spqr_cc_for_each_in(const CCResult* cc,
+void spqr_cc_for_each_in(const SpqrCCResult* cc,
                          uint32_t component_id,
                          NodeCallback callback,
                          void* user_data);
 
 // BC tree
-BCTree* spqr_bc_tree_build(const Graph* graph);
-void spqr_bc_tree_free(BCTree* bc);
+SpqrBCTreeFFI* spqr_bc_tree_build(const SpqrGraphFFI* graph);
+void spqr_bc_tree_free(SpqrBCTreeFFI* bc);
 
-uint32_t spqr_bc_num_blocks(const BCTree* bc);
-uint32_t spqr_bc_num_cut_vertices(const BCTree* bc);
-bool spqr_bc_is_biconnected(const BCTree* bc);  // single block, no cut vertices
-bool spqr_bc_is_cut_vertex(const BCTree* bc, uint32_t node);
+uint32_t spqr_bc_num_blocks(const SpqrBCTreeFFI* bc);
+uint32_t spqr_bc_num_cut_vertices(const SpqrBCTreeFFI* bc);
+bool spqr_bc_is_biconnected(const SpqrBCTreeFFI* bc);  // single block, no cut vertices
+bool spqr_bc_is_cut_vertex(const SpqrBCTreeFFI* bc, uint32_t node);
 
-const uint32_t* spqr_bc_block_nodes(const BCTree* bc, uint32_t block_idx, uint32_t* out_len);
-const uint32_t* spqr_bc_block_edges(const BCTree* bc, uint32_t block_idx, uint32_t* out_len);
-const uint32_t* spqr_bc_cut_vertices(const BCTree* bc, uint32_t* out_len);
+const uint32_t* spqr_bc_block_nodes(const SpqrBCTreeFFI* bc, uint32_t block_idx, uint32_t* out_len);
+const uint32_t* spqr_bc_block_edges(const SpqrBCTreeFFI* bc, uint32_t block_idx, uint32_t* out_len);
+const uint32_t* spqr_bc_cut_vertices(const SpqrBCTreeFFI* bc, uint32_t* out_len);
 
 typedef struct {
 	uint32_t node_start;
@@ -126,17 +126,17 @@ typedef struct {
 } BCBlock;
 
 // zero copy access to internal arrays
-const BCBlock* spqr_bc_blocks_raw(const BCTree* bc, uint32_t* out_num_blocks);
-const uint32_t* spqr_bc_nodes_flat_raw(const BCTree* bc, uint32_t* out_len);
-const uint32_t* spqr_bc_edges_flat_raw(const BCTree* bc, uint32_t* out_len);
+const BCBlock* spqr_bc_blocks_raw(const SpqrBCTreeFFI* bc, uint32_t* out_num_blocks);
+const uint32_t* spqr_bc_nodes_flat_raw(const SpqrBCTreeFFI* bc, uint32_t* out_len);
+const uint32_t* spqr_bc_edges_flat_raw(const SpqrBCTreeFFI* bc, uint32_t* out_len);
 
-void spqr_bc_get_sizes(const BCTree* bc,
+void spqr_bc_get_sizes(const SpqrBCTreeFFI* bc,
                        uint32_t* out_num_blocks,
                        uint32_t* out_total_nodes,
                        uint32_t* out_total_edges);
 
 // copies data (use raw functions above if you don't need owned copies)
-void spqr_bc_bulk_export(const BCTree* bc,
+void spqr_bc_bulk_export(const SpqrBCTreeFFI* bc,
                          uint32_t* block_node_offsets,
                          uint32_t* block_nodes,
                          uint32_t* block_edge_offsets,
@@ -144,7 +144,7 @@ void spqr_bc_bulk_export(const BCTree* bc,
 
 // SPQR tree
 
-SpqrResult* spqr_build(const Graph* graph);  // graph should be biconnected
+SpqrResult* spqr_build(const SpqrGraphFFI* graph);  // graph should be biconnected
 void spqr_result_free(SpqrResult* result);
 
 const SpqrTree* spqr_result_tree(const SpqrResult* result);
@@ -220,10 +220,6 @@ void spqr_tree_bulk_export_node_mapping(const SpqrTree* tree,
                                         uint32_t* node_mapping_offsets,
                                         uint32_t* node_mapping);
 
-/*
- * Zero-copy access to internal flat arrays.
- * Pointers valid until tree is free
- */
 
 void spqr_tree_info(const SpqrTree* tree, uint32_t* out_num_nodes, uint32_t* out_root);
 
@@ -241,7 +237,7 @@ void spqr_tree_node_mapping_raw(const SpqrTree* tree,
 
 const uint32_t* spqr_tree_skeleton_num_nodes_raw(const SpqrTree* tree);
 
-char* spqr_format_to_string(const Graph* graph, const SpqrResult* result);
+char* spqr_format_to_string(const SpqrGraphFFI* graph, const SpqrResult* result);
 void spqr_string_free(char* s);
 
 #ifdef __cplusplus
@@ -252,14 +248,22 @@ void spqr_string_free(char* s);
 
 namespace spqr {
 
+	using node = uint32_t;
+	using edge = uint32_t;
+	using tree_node = uint32_t;
+	
+	constexpr node INVALID_NODE = SPQR_INVALID;
+	constexpr edge INVALID_EDGE = SPQR_INVALID;
+	constexpr tree_node INVALID_TREE_NODE = SPQR_INVALID;
+
 	struct GraphDeleter {
-		void operator()(Graph* p) const { spqr_graph_free(p); }
+		void operator()(SpqrGraphFFI* p) const { spqr_graph_free(p); }
 	};
 	struct CCResultDeleter {
-		void operator()(CCResult* p) const { spqr_cc_free(p); }
+		void operator()(SpqrCCResult* p) const { spqr_cc_free(p); }
 	};
 	struct BCTreeDeleter {
-		void operator()(BCTree* p) const { spqr_bc_tree_free(p); }
+		void operator()(SpqrBCTreeFFI* p) const { spqr_bc_tree_free(p); }
 	};
 	struct SpqrResultDeleter {
 		void operator()(SpqrResult* p) const { spqr_result_free(p); }
@@ -268,9 +272,9 @@ namespace spqr {
 		void operator()(char* p) const { spqr_string_free(p); }
 	};
 
-	using GraphPtr = std::unique_ptr<Graph, GraphDeleter>;
-	using CCResultPtr = std::unique_ptr<CCResult, CCResultDeleter>;
-	using BCTreePtr = std::unique_ptr<BCTree, BCTreeDeleter>;
+	using GraphPtr = std::unique_ptr<SpqrGraphFFI, GraphDeleter>;
+	using CCResultPtr = std::unique_ptr<SpqrCCResult, CCResultDeleter>;
+	using BCTreePtr = std::unique_ptr<SpqrBCTreeFFI, BCTreeDeleter>;
 	using SpqrResultPtr = std::unique_ptr<SpqrResult, SpqrResultDeleter>;
 	using StringPtr = std::unique_ptr<char, StringDeleter>;
 
@@ -278,15 +282,15 @@ namespace spqr {
 		return GraphPtr(spqr_graph_new(node_capacity, edge_capacity));
 	}
 
-	inline SpqrResultPtr build_spqr(const Graph* graph) {
+	inline SpqrResultPtr build_spqr(const SpqrGraphFFI* graph) {
 		return SpqrResultPtr(spqr_build(graph));
 	}
 
-	inline BCTreePtr build_bc_tree(const Graph* graph) {
+	inline BCTreePtr build_bc_tree(const SpqrGraphFFI* graph) {
 		return BCTreePtr(spqr_bc_tree_build(graph));
 	}
 
-	inline CCResultPtr compute_cc(const Graph* graph) {
+	inline CCResultPtr compute_cc(const SpqrGraphFFI* graph) {
 		return CCResultPtr(spqr_connected_components(graph));
 	}
 
