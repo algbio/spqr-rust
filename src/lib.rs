@@ -2008,8 +2008,10 @@ fn assemble_spqr_tree(graph: &Graph, components: &[SplitComponent], next_virtual
         local_of(comp.pole_b);
         let mut se = Vec::with_capacity(comp.edges.len());
         for edge in &comp.edges {
-            let ls = NodeId(local_of(edge.src));
-            let ld = NodeId(local_of(edge.dst));
+            let ls_val = local_of(edge.src);
+            let ld_val = local_of(edge.dst);
+            let ls = NodeId(ls_val);
+            let ld = NodeId(ld_val);
             let is_real = (edge.eid as usize) < m;
             se.push(SkeletonEdge {
                 src: ls,
@@ -2024,7 +2026,20 @@ fn assemble_spqr_tree(graph: &Graph, components: &[SplitComponent], next_virtual
                 twin_edge_idx: INVALID,
             });
         }
-        builder.add_node(nt, n2o.len() as u32, se, n2o);
+        let num_nodes = n2o.len() as u32;
+        // Strict assertion: verify all edge indices are within bounds
+        for (i, e) in se.iter().enumerate() {
+            assert!(
+                e.src.0 < num_nodes && e.dst.0 < num_nodes,
+                "Edge {} has invalid indices: src={}, dst={}, num_nodes={}, tree_node_idx={}",
+                i,
+                e.src.0,
+                e.dst.0,
+                num_nodes,
+                builder.num_nodes()
+            );
+        }
+        builder.add_node(nt, num_nodes, se, n2o);
     }
 
     let num_nodes = builder.num_nodes();
@@ -2224,7 +2239,7 @@ impl SpqrTree {
     fn rebuild_with_merges(&mut self, absorbed_into: &[Option<TreeNodeId>]) {
         let n = self.len();
 
-        // Build mapping from old node ID to new node ID
+        // Build mapping from old tree node ID to new tree node ID
         let mut old_to_new: Vec<TreeNodeId> = vec![TreeNodeId::INVALID; n];
         let mut new_idx = 0u32;
         for i in 0..n {
@@ -2246,11 +2261,47 @@ impl SpqrTree {
             return; // Nothing absorbed
         }
 
+        // ===== BUILD UNIFIED LOCAL NODE MAPPINGS =====
+        // For each new tree node, build a mapping: original_node_id -> new_local_index
+        // This handles merging of skeletons by identifying nodes via their original IDs
+
+        let mut new_local_maps: Vec<std::collections::HashMap<u32, u32>> =
+            vec![std::collections::HashMap::new(); new_count];
+
+        // First pass: collect all original nodes for each new tree node
+        for i in 0..n {
+            let new_i = old_to_new[i].idx();
+            let map_start = self.node_mapping_offsets[i] as usize;
+            let map_end = self.node_mapping_offsets[i + 1] as usize;
+
+            for local_idx in 0..(map_end - map_start) {
+                let orig_node = self.node_mapping[map_start + local_idx].0;
+                // Insert if not already present (first occurrence gets the index)
+                let next_idx = new_local_maps[new_i].len() as u32;
+                new_local_maps[new_i].entry(orig_node).or_insert(next_idx);
+            }
+        }
+
+        // Build reverse mapping: for each old tree node, map old_local -> new_local
+        // old_local -> original -> new_local
+        let mut local_remaps: Vec<Vec<u32>> = Vec::with_capacity(n);
+        for i in 0..n {
+            let new_i = old_to_new[i].idx();
+            let map_start = self.node_mapping_offsets[i] as usize;
+            let map_end = self.node_mapping_offsets[i + 1] as usize;
+            let num_local = map_end - map_start;
+
+            let mut remap = vec![0u32; num_local];
+            for local_idx in 0..num_local {
+                let orig_node = self.node_mapping[map_start + local_idx].0;
+                remap[local_idx] = new_local_maps[new_i][&orig_node];
+            }
+            local_remaps.push(remap);
+        }
+
         // ===== PASS 1: Count sizes for each new node =====
-        // Simple u32 arrays instead of Vec<Vec<T>> - much less memory!
         let mut edge_counts: Vec<u32> = vec![0; new_count];
         let mut child_counts: Vec<u32> = vec![0; new_count];
-        let mut mapping_counts: Vec<u32> = vec![0; new_count];
 
         for i in 0..n {
             let new_i = old_to_new[i].idx();
@@ -2269,12 +2320,8 @@ impl SpqrTree {
                 edge_counts[new_i] += 1;
             }
 
-            // Count mappings (only for surviving nodes)
+            // Count direct children (only for non-absorbed nodes)
             if absorbed_into[i].is_none() {
-                let map_len = self.node_mapping_offsets[i + 1] - self.node_mapping_offsets[i];
-                mapping_counts[new_i] = map_len;
-
-                // Count direct children
                 let cs = self.children_offsets[i] as usize;
                 let ce = self.children_offsets[i + 1] as usize;
                 for ci in cs..ce {
@@ -2301,10 +2348,8 @@ impl SpqrTree {
             }
         }
 
-        // ===== PASS 2: Build offset arrays =====
         let total_edges: usize = edge_counts.iter().map(|&x| x as usize).sum();
         let total_children: usize = child_counts.iter().map(|&x| x as usize).sum();
-        let total_mapping: usize = mapping_counts.iter().map(|&x| x as usize).sum();
 
         let mut new_skeleton_offsets: Vec<u32> = Vec::with_capacity(new_count + 1);
         let mut new_children_offsets: Vec<u32> = Vec::with_capacity(new_count + 1);
@@ -2317,10 +2362,11 @@ impl SpqrTree {
         for i in 0..new_count {
             new_skeleton_offsets.push(new_skeleton_offsets[i] + edge_counts[i]);
             new_children_offsets.push(new_children_offsets[i] + child_counts[i]);
-            new_mapping_offsets.push(new_mapping_offsets[i] + mapping_counts[i]);
+            new_mapping_offsets.push(new_mapping_offsets[i] + new_local_maps[i].len() as u32);
         }
 
-        // ===== PASS 3: Allocate final arrays with exact sizes =====
+        let total_mapping = new_mapping_offsets[new_count] as usize;
+
         let mut new_node_types: Vec<SpqrNodeType> = vec![SpqrNodeType::R; new_count];
         let mut new_node_parents: Vec<TreeNodeId> = vec![TreeNodeId::INVALID; new_count];
         let mut new_skeleton_num_nodes: Vec<u32> = vec![0; new_count];
@@ -2332,7 +2378,22 @@ impl SpqrTree {
         let mut edge_write_pos: Vec<u32> = new_skeleton_offsets[..new_count].to_vec();
         let mut child_write_pos: Vec<u32> = new_children_offsets[..new_count].to_vec();
 
-        // ===== PASS 4: Fill data =====
+        for new_i in 0..new_count {
+            let map = &new_local_maps[new_i];
+            let map_start = new_mapping_offsets[new_i] as usize;
+
+            // Sort by new local index to maintain order
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by_key(|(_, &idx)| idx);
+
+            for (orig_node, &new_local) in entries {
+                new_node_mapping[map_start + new_local as usize] = NodeId(*orig_node);
+            }
+
+            new_skeleton_num_nodes[new_i] = map.len() as u32;
+        }
+
+        // Fill node info from non-absorbed nodes
         for i in 0..n {
             if absorbed_into[i].is_some() {
                 continue;
@@ -2348,15 +2409,6 @@ impl SpqrTree {
             } else {
                 TreeNodeId::INVALID
             };
-            new_skeleton_num_nodes[new_i] = self.skeleton_num_nodes[i];
-
-            // Copy node mapping directly
-            let map_start = self.node_mapping_offsets[i] as usize;
-            let map_end = self.node_mapping_offsets[i + 1] as usize;
-            let new_map_start = new_mapping_offsets[new_i] as usize;
-            for (j, &val) in self.node_mapping[map_start..map_end].iter().enumerate() {
-                new_node_mapping[new_map_start + j] = val;
-            }
 
             // Copy direct children
             let cs = self.children_offsets[i] as usize;
@@ -2388,11 +2440,11 @@ impl SpqrTree {
             }
         }
 
-        // Copy edges from all nodes (including absorbed)
         for i in 0..n {
             let new_i = old_to_new[i].idx();
             let edge_start = self.skeleton_offsets[i] as usize;
             let edge_end = self.skeleton_offsets[i + 1] as usize;
+            let remap = &local_remaps[i];
 
             for ei in edge_start..edge_end {
                 let mut e = self.skeleton_edges[ei];
@@ -2403,6 +2455,14 @@ impl SpqrTree {
                         continue; // Skip merged virtual edge
                     }
                     e.twin_tree_node = twin_new;
+                }
+
+                // REMAP src and dst to new local indices
+                let old_src = e.src.0 as usize;
+                let old_dst = e.dst.0 as usize;
+                if old_src < remap.len() && old_dst < remap.len() {
+                    e.src = NodeId(remap[old_src]);
+                    e.dst = NodeId(remap[old_dst]);
                 }
 
                 let pos = edge_write_pos[new_i] as usize;
