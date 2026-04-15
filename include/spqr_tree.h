@@ -220,6 +220,10 @@ void spqr_tree_bulk_export_node_mapping(const SpqrTree* tree,
                                         uint32_t* node_mapping_offsets,
                                         uint32_t* node_mapping);
 
+/*
+ * Zero-copy access to internal flat arrays.
+ * Pointers valid until tree is free
+ */
 
 void spqr_tree_info(const SpqrTree* tree, uint32_t* out_num_nodes, uint32_t* out_root);
 
@@ -246,56 +250,34 @@ void spqr_string_free(char* s);
 #include <memory>
 #include <stdexcept>
 
-namespace spqr {
+namespace spqr_ffi {
 
-	using node = uint32_t;
-	using edge = uint32_t;
-	using tree_node = uint32_t;
-	
-	constexpr node INVALID_NODE = SPQR_INVALID;
-	constexpr edge INVALID_EDGE = SPQR_INVALID;
-	constexpr tree_node INVALID_TREE_NODE = SPQR_INVALID;
+struct GraphDeleter { void operator()(SpqrGraphFFI* p) const { spqr_graph_free(p); } };
+struct CCResultDeleter { void operator()(SpqrCCResult* p) const { spqr_cc_free(p); } };
+struct BCTreeDeleter { void operator()(SpqrBCTreeFFI* p) const { spqr_bc_tree_free(p); } };
+struct SpqrResultDeleter { void operator()(SpqrResult* p) const { spqr_result_free(p); } };
+struct StringDeleter { void operator()(char* p) const { spqr_string_free(p); } };
 
-	struct GraphDeleter {
-		void operator()(SpqrGraphFFI* p) const { spqr_graph_free(p); }
-	};
-	struct CCResultDeleter {
-		void operator()(SpqrCCResult* p) const { spqr_cc_free(p); }
-	};
-	struct BCTreeDeleter {
-		void operator()(SpqrBCTreeFFI* p) const { spqr_bc_tree_free(p); }
-	};
-	struct SpqrResultDeleter {
-		void operator()(SpqrResult* p) const { spqr_result_free(p); }
-	};
-	struct StringDeleter {
-		void operator()(char* p) const { spqr_string_free(p); }
-	};
+using GraphPtr = std::unique_ptr<SpqrGraphFFI, GraphDeleter>;
+using CCResultPtr = std::unique_ptr<SpqrCCResult, CCResultDeleter>;
+using BCTreePtr = std::unique_ptr<SpqrBCTreeFFI, BCTreeDeleter>;
+using SpqrResultPtr = std::unique_ptr<SpqrResult, SpqrResultDeleter>;
+using StringPtr = std::unique_ptr<char, StringDeleter>;
 
-	using GraphPtr = std::unique_ptr<SpqrGraphFFI, GraphDeleter>;
-	using CCResultPtr = std::unique_ptr<SpqrCCResult, CCResultDeleter>;
-	using BCTreePtr = std::unique_ptr<SpqrBCTreeFFI, BCTreeDeleter>;
-	using SpqrResultPtr = std::unique_ptr<SpqrResult, SpqrResultDeleter>;
-	using StringPtr = std::unique_ptr<char, StringDeleter>;
-
-	inline GraphPtr make_graph(uint32_t node_capacity = 0, uint32_t edge_capacity = 0) {
-		return GraphPtr(spqr_graph_new(node_capacity, edge_capacity));
-	}
-
-	inline SpqrResultPtr build_spqr(const SpqrGraphFFI* graph) {
-		return SpqrResultPtr(spqr_build(graph));
-	}
-
-	inline BCTreePtr build_bc_tree(const SpqrGraphFFI* graph) {
-		return BCTreePtr(spqr_bc_tree_build(graph));
-	}
-
-	inline CCResultPtr compute_cc(const SpqrGraphFFI* graph) {
-		return CCResultPtr(spqr_connected_components(graph));
-	}
+inline GraphPtr make_graph(uint32_t node_capacity=0, uint32_t edge_capacity=0) {
+    return GraphPtr(spqr_graph_new(node_capacity, edge_capacity));
+}
+inline SpqrResultPtr build_spqr(const SpqrGraphFFI* graph) {
+    return SpqrResultPtr(spqr_build(graph));
+}
+inline BCTreePtr build_bc_tree(const SpqrGraphFFI* graph) {
+    return BCTreePtr(spqr_bc_tree_build(graph));
+}
+inline CCResultPtr compute_cc(const SpqrGraphFFI* graph) {
+    return CCResultPtr(spqr_connected_components(graph));
+}
 
 }
 
 #endif
-
 #endif

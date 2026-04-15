@@ -134,7 +134,6 @@ fn main() {
             subgraph.add_edge(NodeId(*u), NodeId(*v));
         }
 
-        // Build SPQR tree
         let result = build_spqr(&subgraph);
         let spqr = &result.tree;
 
