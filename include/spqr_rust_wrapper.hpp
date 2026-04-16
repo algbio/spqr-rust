@@ -113,6 +113,33 @@ public:
     node edgeSrc(edge e) const { return spqr_graph_edge_src(ptr_, e); }
     node edgeDst(edge e) const { return spqr_graph_edge_dst(ptr_, e); }
     uint32_t degree(node v) const { return spqr_graph_degree(ptr_, v); }
+    
+    // Compute outdeg/indeg by counting (O(degree) per call)
+    uint32_t outdeg(node v) const {
+        uint32_t count = 0;
+        uint32_t cursor = spqr_graph_adj_cursor(ptr_, v);
+        node neighbor;
+        edge e;
+        uint32_t next;
+        while (spqr_graph_adj_next(ptr_, cursor, &neighbor, &e, &next)) {
+            if (spqr_graph_edge_src(ptr_, e) == v) ++count;
+            cursor = next;
+        }
+        return count;
+    }
+    
+    uint32_t indeg(node v) const {
+        uint32_t count = 0;
+        uint32_t cursor = spqr_graph_adj_cursor(ptr_, v);
+        node neighbor;
+        edge e;
+        uint32_t next;
+        while (spqr_graph_adj_next(ptr_, cursor, &neighbor, &e, &next)) {
+            if (spqr_graph_edge_dst(ptr_, e) == v) ++count;
+            cursor = next;
+        }
+        return count;
+    }
 
     uint32_t adjCursor(node v) const {
         return spqr_graph_adj_cursor(ptr_, v);

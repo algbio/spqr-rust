@@ -153,6 +153,7 @@ struct BCTreeBuilder<'a> {
     disc: Vec<u32>,
     low: Vec<u32>,
     parent: Vec<u32>,
+    parent_edge: Vec<u32>,
     time: u32,
 
     edge_stack: Vec<(u32, u32, u32)>, // (u, v, edge_id)
@@ -179,6 +180,7 @@ impl<'a> BCTreeBuilder<'a> {
             disc: vec![0; n],
             low: vec![0; n],
             parent: vec![INVALID; n],
+            parent_edge: vec![INVALID; n],
             time: 0,
             edge_stack: Vec::with_capacity(graph.num_edges()),
             blocks: Vec::new(),
@@ -259,6 +261,7 @@ impl<'a> BCTreeBuilder<'a> {
 
                 if self.disc[v_idx] == 0 {
                     self.parent[v_idx] = u;
+                    self.parent_edge[v_idx] = eid.0;
                     self.push_edge(u, v_u32, eid.0);
 
                     self.disc[v_idx] = self.time;
@@ -268,7 +271,7 @@ impl<'a> BCTreeBuilder<'a> {
                     stack.last_mut().unwrap().2 += 1;
                     let v_cursor = self.graph.adj_cursor(v);
                     stack.push((v_u32, v_cursor, 0));
-                } else if v_u32 != self.parent[u_idx] && self.disc[v_idx] < self.disc[u_idx] {
+                } else if eid.0 != self.parent_edge[u_idx] && self.disc[v_idx] < self.disc[u_idx] {
                     // Back edge
                     self.low[u_idx] = self.low[u_idx].min(self.disc[v_idx]);
                     self.push_edge(u, v_u32, eid.0);
@@ -284,7 +287,7 @@ impl<'a> BCTreeBuilder<'a> {
 
                     // Check articulation point
                     if self.low[u_idx] >= self.disc[p_idx] {
-                        self.extract_block(p, u);
+                        self.extract_block(self.parent_edge[u_idx]);
                         // p is cut vertex unless it's root with single child
                         if self.parent[p_idx] != INVALID {
                             self.mark_cut(p_idx);
@@ -300,7 +303,7 @@ impl<'a> BCTreeBuilder<'a> {
         }
     }
 
-    fn extract_block(&mut self, u: u32, v: u32) {
+    fn extract_block(&mut self, tree_eid: u32) {
         let node_start = self.block_nodes_flat.len() as u32;
         let edge_start = self.block_edges_flat.len() as u32;
 
@@ -321,7 +324,7 @@ impl<'a> BCTreeBuilder<'a> {
                 self.block_nodes_flat.push(NodeId(y));
             }
 
-            if (x == u && y == v) || (x == v && y == u) {
+            if eid == tree_eid {
                 break;
             }
         }
