@@ -6,13 +6,24 @@ use crate::biconnected::BCTree;
 use crate::connected::{connected_components, ConnectedComponents};
 use crate::spqr_format::write_spqr_format;
 use crate::{
-    build_spqr, EdgeId, Graph, NodeId, SkeletonEdge, SpqrNodeType, SpqrResult, SpqrTree, TreeNodeId,
+    build_spqr, EdgeId, Graph, NodeId, SkeletonEdge, SpqrNodeType, SpqrResult, SpqrTree,
+    TreeNodeId, FAST_CYCLE_CALLS, FAST_CYCLE_HITS,
 };
 use std::ffi::CStr;
 use std::io::Cursor;
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
+
+#[no_mangle]
+pub extern "C" fn spqr_get_fast_cycle_hits() -> u64 {
+    FAST_CYCLE_HITS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[no_mangle]
+pub extern "C" fn spqr_get_fast_cycle_calls() -> u64 {
+    FAST_CYCLE_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 #[no_mangle]
 pub extern "C" fn spqr_graph_new(node_capacity: u32, edge_capacity: u32) -> *mut Graph {

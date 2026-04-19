@@ -9,6 +9,8 @@
 #include "spqr_rust_wrapper.hpp"
 #include <vector>
 #include <memory>
+#include <unordered_map>
+#include <cstdint>
 
 namespace spqr {
 
@@ -459,26 +461,50 @@ class StaticSPQRTree {
     std::vector<uint32_t> parents_;
     TreeGraph tree_;
     const Graph* gccGraph_ = nullptr;
-    
+
+    mutable std::unordered_map<uint64_t, uint32_t> virtualIndex_;
+    mutable bool virtualIndexBuilt_ = false;
+
+    static uint64_t packTreePair_(uint32_t from, uint32_t to) {
+        return (static_cast<uint64_t>(from) << 32) | static_cast<uint64_t>(to);
+    }
+
+    void buildVirtualIndex_() const {
+        if (virtualIndexBuilt_) return;
+        // Walk all tree nodes, scan their skeleton edges once, index virtual ones.
+        virtualIndex_.reserve(view_.numNodes * 2);
+        for (uint32_t tn = 0; tn < view_.numNodes; ++tn) {
+            uint32_t s = view_.skeletonOffsets[tn];
+            uint32_t e = view_.skeletonOffsets[tn + 1];
+            for (uint32_t i = s; i < e; ++i) {
+                const auto& se = view_.skeletonEdges[i];
+                if (se.real_edge == UINT32_MAX) {
+                    // Virtual edge: connects tn to se.twin_tree_node
+                    virtualIndex_.emplace(packTreePair_(tn, se.twin_tree_node), i);
+                }
+            }
+        }
+        virtualIndexBuilt_ = true;
+    }
+
     void buildTree() {
         parents_.resize(view_.numNodes);
         for (uint32_t i = 0; i < view_.numNodes; ++i) parents_[i] = view_.nodeParents[i];
         tree_.build(view_.numNodes, parents_);
     }
     edge findVirtual(tree_node from, tree_node to) const {
-        uint32_t s = view_.skeletonOffsets[from.idx], e = view_.skeletonOffsets[from.idx + 1];
-        for (uint32_t i = s; i < e; ++i)
-            if (view_.skeletonEdges[i].real_edge == UINT32_MAX && view_.skeletonEdges[i].twin_tree_node == to.idx)
-                return edge{i - s};  // Local index within skeleton
-        return INVALID_EDGE;
+        buildVirtualIndex_();
+        auto it = virtualIndex_.find(packTreePair_(from.idx, to.idx));
+        if (it == virtualIndex_.end()) return INVALID_EDGE;
+        // Return LOCAL index within the from-skeleton
+        return edge{it->second - view_.skeletonOffsets[from.idx]};
     }
     // Return GLOBAL edge index (unique across all skeletons) for use as map key
     edge findVirtualGlobal(tree_node from, tree_node to) const {
-        uint32_t s = view_.skeletonOffsets[from.idx], e = view_.skeletonOffsets[from.idx + 1];
-        for (uint32_t i = s; i < e; ++i)
-            if (view_.skeletonEdges[i].real_edge == UINT32_MAX && view_.skeletonEdges[i].twin_tree_node == to.idx)
-                return edge{i};  // Global index
-        return INVALID_EDGE;
+        buildVirtualIndex_();
+        auto it = virtualIndex_.find(packTreePair_(from.idx, to.idx));
+        if (it == virtualIndex_.end()) return INVALID_EDGE;
+        return edge{it->second};
     }
 
 public:
@@ -504,6 +530,18 @@ public:
         uint32_t nNodes_, edgeOff_, edgeEnd_;
         uint32_t mapOff_;
 
+        // Lazy-built CSR adjacency:
+        //   adjStart_[v] .. adjStart_[v+1]   → slice in adjEdges_ / adjNeighbors_
+        //   adjEdges_[k]                     → GLOBAL edge index in view_.skeletonEdges
+        //   adjNeighbors_[k]                 → local neighbor node id
+        // Stores each undirected edge twice (once per endpoint).
+        // Built on first call to forEachAdj(); subsequent calls are O(deg(v)).
+        // Total build cost: O(E_skel); memory: O(E_skel).
+        mutable std::vector<uint32_t> adjStart_;
+        mutable std::vector<uint32_t> adjEdges_;
+        mutable std::vector<uint32_t> adjNeighbors_;
+        mutable bool adjBuilt_ = false;
+
         std::pair<uint32_t, uint32_t> orientedEndpoints_(uint32_t skelIdx) const {
             const auto& se = view_.skeletonEdges[skelIdx];
             if (se.real_edge == UINT32_MAX || gccGraph_ == nullptr)
@@ -512,6 +550,38 @@ public:
             if (view_.nodeMapping[mapOff_ + se.src] == gSrc.idx)
                 return {se.src, se.dst};
             return {se.dst, se.src};
+        }
+
+        void buildAdj_() const {
+            if (adjBuilt_) return;
+            const uint32_t n = nNodes_;
+            // 1) degree count
+            adjStart_.assign(n + 1, 0);
+            for (uint32_t i = edgeOff_; i < edgeEnd_; ++i) {
+                auto [s, d] = orientedEndpoints_(i);
+                ++adjStart_[s + 1];
+                if (d != s) ++adjStart_[d + 1];
+            }
+            // 2) prefix sum offsets.
+            for (uint32_t v = 0; v < n; ++v)
+                adjStart_[v + 1] += adjStart_[v];
+            // 3) bucket fill
+            const uint32_t total = adjStart_[n];
+            adjEdges_.assign(total, 0);
+            adjNeighbors_.assign(total, 0);
+            std::vector<uint32_t> cursor(adjStart_.begin(), adjStart_.begin() + n);
+            for (uint32_t i = edgeOff_; i < edgeEnd_; ++i) {
+                auto [s, d] = orientedEndpoints_(i);
+                uint32_t ps = cursor[s]++;
+                adjEdges_[ps] = i;
+                adjNeighbors_[ps] = d;
+                if (d != s) {
+                    uint32_t pd = cursor[d]++;
+                    adjEdges_[pd] = i;
+                    adjNeighbors_[pd] = s;
+                }
+            }
+            adjBuilt_ = true;
         }
 
     public:
@@ -531,16 +601,16 @@ public:
 
         node firstNode() const { return nNodes_ > 0 ? node{0u} : node{}; }
 
+        // O(deg(v)) after a single O(E_skel) build on first call.
         template<typename F>
         void forEachAdj(node v, F&& f) const {
-            for (uint32_t i = edgeOff_; i < edgeEnd_; ++i) {
-                auto [s, d] = orientedEndpoints_(i);
-                if (s == v.idx) f(node{d}, edge{i});
-                else if (d == v.idx) f(node{s}, edge{i});
-            }
+            buildAdj_();
+            const uint32_t begin = adjStart_[v.idx];
+            const uint32_t end   = adjStart_[v.idx + 1];
+            for (uint32_t k = begin; k < end; ++k)
+                f(node{adjNeighbors_[k]}, edge{adjEdges_[k]});
         }
         
-        // Nodes range (local indices 0..nNodes-1)
         struct NodesRange {
             uint32_t n;
             struct It { 
@@ -556,7 +626,6 @@ public:
         };
         NodesRange nodes{nNodes_};
         
-        // Edges range (GLOBAL indices)
         struct EdgesRange {
             uint32_t off, end_;
             struct It { 
@@ -575,7 +644,7 @@ public:
 
     class Skeleton {
         const StaticSPQRTree& t_; tree_node tn_; mutable std::unique_ptr<SkeletonGraph> g_;
-        // edgeAt accepts GLOBAL edge index
+
         const SkeletonEdge* edgeAt(edge e) const { return &t_.view_.skeletonEdges[e.idx]; }
     public:
         Skeleton(const StaticSPQRTree& t, tree_node tn) : t_(t), tn_(tn) {}
@@ -1064,17 +1133,43 @@ class StaticSPQRTree {
     spqr_rust::SpqrTreeFlatView view_;
     std::vector<uint32_t> parents_;
     TreeGraph tree_;
-    
+
+    // Precomputed O(1) virtual-edge index (see spqr::StaticSPQRTree for rationale).
+    mutable std::unordered_map<uint64_t, uint32_t> virtualIndex_;
+    mutable bool virtualIndexBuilt_ = false;
+
+    static uint64_t packTreePair_(uint32_t from, uint32_t to) {
+        return (static_cast<uint64_t>(from) << 32) | static_cast<uint64_t>(to);
+    }
+
+    void buildVirtualIndex_() const {
+        if (virtualIndexBuilt_) return;
+        virtualIndex_.reserve(view_.numNodes * 2);
+        for (uint32_t tn = 0; tn < view_.numNodes; ++tn) {
+            uint32_t s = view_.skeletonOffsets[tn];
+            uint32_t e = view_.skeletonOffsets[tn + 1];
+            for (uint32_t i = s; i < e; ++i) {
+                const auto& se = view_.skeletonEdges[i];
+                if (se.real_edge == UINT32_MAX) {
+                    virtualIndex_.emplace(packTreePair_(tn, se.twin_tree_node), i);
+                }
+            }
+        }
+        virtualIndexBuilt_ = true;
+    }
+
     void buildTree() { parents_.resize(view_.numNodes); for (uint32_t i = 0; i < view_.numNodes; ++i) parents_[i] = view_.nodeParents[i]; tree_.build(view_.numNodes, parents_); }
     edge findVirtual(tree_node from, tree_node to) const {
-        uint32_t s = view_.skeletonOffsets[from.idx], e = view_.skeletonOffsets[from.idx + 1];
-        for (uint32_t i = s; i < e; ++i) if (view_.skeletonEdges[i].real_edge == UINT32_MAX && view_.skeletonEdges[i].twin_tree_node == to.idx) return edge{i - s};
-        return INVALID_EDGE;
+        buildVirtualIndex_();
+        auto it = virtualIndex_.find(packTreePair_(from.idx, to.idx));
+        if (it == virtualIndex_.end()) return INVALID_EDGE;
+        return edge{it->second - view_.skeletonOffsets[from.idx]};
     }
     edge findVirtualGlobal(tree_node from, tree_node to) const {
-        uint32_t s = view_.skeletonOffsets[from.idx], e = view_.skeletonOffsets[from.idx + 1];
-        for (uint32_t i = s; i < e; ++i) if (view_.skeletonEdges[i].real_edge == UINT32_MAX && view_.skeletonEdges[i].twin_tree_node == to.idx) return edge{i};
-        return INVALID_EDGE;
+        buildVirtualIndex_();
+        auto it = virtualIndex_.find(packTreePair_(from.idx, to.idx));
+        if (it == virtualIndex_.end()) return INVALID_EDGE;
+        return edge{it->second};
     }
 public:
     enum class NodeType { SNode, PNode, RNode };
@@ -1088,11 +1183,44 @@ public:
     const TreeGraph& tree() const { return tree_; }
     tree_node parent(tree_node tn) const { return node{parents_[tn.idx]}; }
     
-    // SkeletonGraph: Graph-like view with globally unique edge indices
     class SkeletonGraph {
         const spqr_rust::SpqrTreeFlatView& view_;
         tree_node tn_;
         uint32_t nNodes_, edgeOff_, edgeEnd_;
+        mutable std::vector<uint32_t> adjStart_;
+        mutable std::vector<uint32_t> adjEdges_;
+        mutable std::vector<uint32_t> adjNeighbors_;
+        mutable bool adjBuilt_ = false;
+
+        void buildAdj_() const {
+            if (adjBuilt_) return;
+            const uint32_t n = nNodes_;
+            adjStart_.assign(n + 1, 0);
+            for (uint32_t i = edgeOff_; i < edgeEnd_; ++i) {
+                const auto& se = view_.skeletonEdges[i];
+                ++adjStart_[se.src + 1];
+                if (se.dst != se.src) ++adjStart_[se.dst + 1];
+            }
+            for (uint32_t v = 0; v < n; ++v)
+                adjStart_[v + 1] += adjStart_[v];
+            const uint32_t total = adjStart_[n];
+            adjEdges_.assign(total, 0);
+            adjNeighbors_.assign(total, 0);
+            std::vector<uint32_t> cursor(adjStart_.begin(), adjStart_.begin() + n);
+            for (uint32_t i = edgeOff_; i < edgeEnd_; ++i) {
+                const auto& se = view_.skeletonEdges[i];
+                uint32_t ps = cursor[se.src]++;
+                adjEdges_[ps] = i;
+                adjNeighbors_[ps] = se.dst;
+                if (se.dst != se.src) {
+                    uint32_t pd = cursor[se.dst]++;
+                    adjEdges_[pd] = i;
+                    adjNeighbors_[pd] = se.src;
+                }
+            }
+            adjBuilt_ = true;
+        }
+
     public:
         SkeletonGraph(const spqr_rust::SpqrTreeFlatView& view, tree_node tn)
             : view_(view), tn_(tn), 
@@ -1106,13 +1234,14 @@ public:
         node target(edge e) const { return node{view_.skeletonEdges[e.idx].dst}; }
         node firstNode() const { return nNodes_ > 0 ? node{0u} : node{}; }
         
+        // O(deg(v)) after a single O(E_skel) build on first call.
         template<typename F>
         void forEachAdj(node v, F&& f) const {
-            for (uint32_t i = edgeOff_; i < edgeEnd_; ++i) {
-                auto& se = view_.skeletonEdges[i];
-                if (se.src == v.idx) f(node{se.dst}, edge{i});
-                else if (se.dst == v.idx) f(node{se.src}, edge{i});
-            }
+            buildAdj_();
+            const uint32_t begin = adjStart_[v.idx];
+            const uint32_t end   = adjStart_[v.idx + 1];
+            for (uint32_t k = begin; k < end; ++k)
+                f(node{adjNeighbors_[k]}, edge{adjEdges_[k]});
         }
         
         struct NodesRange {

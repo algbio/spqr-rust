@@ -736,6 +736,10 @@ fn build_spqr_tree_filtered(graph: &Graph, is_self_loop: &[bool]) -> SpqrTree {
         return build_parallel_case(graph, is_self_loop);
     }
 
+    if let Some(tree) = try_build_simple_cycle(graph, is_self_loop) {
+        return tree;
+    }
+
     let mut next_virtual = m as u32;
     let (multi_comps, synthetic, consumed) =
         split_multi_edges(graph, &mut next_virtual, is_self_loop);
@@ -857,7 +861,94 @@ fn build_parallel_case(graph: &Graph, is_self_loop: &[bool]) -> SpqrTree {
     }
 }
 
-// Multi edge preprocessing
+pub static FAST_CYCLE_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static FAST_CYCLE_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn try_build_simple_cycle(graph: &Graph, is_self_loop: &[bool]) -> Option<SpqrTree> {
+    FAST_CYCLE_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let n = graph.num_nodes();
+    let m = graph.num_edges();
+
+    if n < 3 || m != n {
+        return None;
+    }
+    // No self-loops allowed on the simple-cycle path.
+    if is_self_loop.iter().any(|&b| b) {
+        return None;
+    }
+    // Every vertex has degree exactly 2.
+    for v in 0..n {
+        if graph.degree(NodeId(v as u32)) != 2 {
+            return None;
+        }
+    }
+
+    // walk the cycle starting at vertex 0
+    let mut order: Vec<u32> = Vec::with_capacity(n);
+    let mut edge_order: Vec<u32> = Vec::with_capacity(n);
+    let mut visited = vec![false; n];
+
+    let mut current: u32 = 0;
+    let mut prev_edge: u32 = u32::MAX;
+    visited[0] = true;
+    order.push(0);
+
+    for step in 0..n {
+        // Pick the incident edge that isn'tprev_edge
+        let mut next_node: u32 = u32::MAX;
+        let mut next_edge: u32 = u32::MAX;
+        for (nb, eid) in graph.neighbors(NodeId(current)) {
+            if eid.0 != prev_edge {
+                next_node = nb.0;
+                next_edge = eid.0;
+                break;
+            }
+        }
+        if next_edge == u32::MAX {
+            return None;
+        }
+        edge_order.push(next_edge);
+
+        if step == n - 1 {
+            if next_node != 0 {
+                return None;
+            }
+            break;
+        }
+        if (next_node as usize) >= n || visited[next_node as usize] {
+            return None;
+        }
+        visited[next_node as usize] = true;
+        order.push(next_node);
+        prev_edge = next_edge;
+        current = next_node;
+    }
+
+    debug_assert_eq!(order.len(), n);
+    debug_assert_eq!(edge_order.len(), n);
+
+    let mut edges: Vec<SkeletonEdge> = Vec::with_capacity(n);
+    for i in 0..n {
+        edges.push(SkeletonEdge {
+            src: NodeId(i as u32),
+            dst: NodeId(((i + 1) % n) as u32),
+            real_edge: EdgeId(edge_order[i]),
+            virtual_id: INVALID,
+            twin_tree_node: TreeNodeId::INVALID,
+            twin_edge_idx: INVALID,
+        });
+    }
+    let node_mapping: Vec<NodeId> = order.into_iter().map(NodeId).collect();
+
+    FAST_CYCLE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    Some(SpqrTree::single_node(
+        m,
+        SpqrNodeType::S,
+        n as u32,
+        edges,
+        node_mapping,
+    ))
+}
 
 #[allow(clippy::type_complexity)]
 fn split_multi_edges(

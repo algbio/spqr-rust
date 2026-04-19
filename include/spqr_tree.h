@@ -47,6 +47,9 @@ typedef struct SkeletonEdgeInfo {
 SpqrGraphFFI* spqr_graph_new(uint32_t node_capacity, uint32_t edge_capacity);
 void spqr_graph_free(SpqrGraphFFI* graph);
 
+uint64_t spqr_get_fast_cycle_hits(void);
+uint64_t spqr_get_fast_cycle_calls(void);
+
 // returns ID of first added node
 uint32_t spqr_graph_add_nodes(SpqrGraphFFI* graph, uint32_t count);
 uint32_t spqr_graph_add_edge(SpqrGraphFFI* graph, uint32_t u, uint32_t v);
