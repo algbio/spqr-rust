@@ -282,7 +282,6 @@ public:
     
     node firstNode() const { return numberOfNodes() > 0 ? node{0u} : INVALID_NODE; }
     
-    // In this namespace you need the graph to get source/target (edge doesn't know its graph)
     node source(edge e) const { return node{g_->edgeSrc(e.idx)}; }
     node target(edge e) const { return node{g_->edgeDst(e.idx)}; }
     
@@ -521,8 +520,11 @@ public:
     NodeType typeOf(tree_node tn) const { return view_.nodeTypes[tn.idx] == 0 ? NodeType::SNode : view_.nodeTypes[tn.idx] == 1 ? NodeType::PNode : NodeType::RNode; }
     const TreeGraph& tree() const { return tree_; }
     tree_node parent(tree_node tn) const { return node{parents_[tn.idx]}; }
-    
-    // SkeletonGraph: Graph-like view with globally unique edge indices
+
+
+    const spqr_rust::SpqrTreeFlatView& flatView() const { return view_; }
+    const Graph* gccGraph() const { return gccGraph_; }
+
     class SkeletonGraph {
         const spqr_rust::SpqrTreeFlatView& view_;
         const Graph* gccGraph_;
@@ -530,13 +532,6 @@ public:
         uint32_t nNodes_, edgeOff_, edgeEnd_;
         uint32_t mapOff_;
 
-        // Lazy-built CSR adjacency:
-        //   adjStart_[v] .. adjStart_[v+1]   → slice in adjEdges_ / adjNeighbors_
-        //   adjEdges_[k]                     → GLOBAL edge index in view_.skeletonEdges
-        //   adjNeighbors_[k]                 → local neighbor node id
-        // Stores each undirected edge twice (once per endpoint).
-        // Built on first call to forEachAdj(); subsequent calls are O(deg(v)).
-        // Total build cost: O(E_skel); memory: O(E_skel).
         mutable std::vector<uint32_t> adjStart_;
         mutable std::vector<uint32_t> adjEdges_;
         mutable std::vector<uint32_t> adjNeighbors_;
@@ -562,7 +557,7 @@ public:
                 ++adjStart_[s + 1];
                 if (d != s) ++adjStart_[d + 1];
             }
-            // 2) prefix sum offsets.
+            // 2) prefix sum offsets
             for (uint32_t v = 0; v < n; ++v)
                 adjStart_[v + 1] += adjStart_[v];
             // 3) bucket fill
@@ -654,6 +649,33 @@ public:
         bool isVirtual(edge e) const { return edgeAt(e)->real_edge == UINT32_MAX; }
         tree_node twinTreeNode(edge e) const { auto* se = edgeAt(e); return se->real_edge == UINT32_MAX ? node{se->twin_tree_node} : INVALID_NODE; }
         edge realEdge(edge e) const { auto* se = edgeAt(e); return se->real_edge != UINT32_MAX ? edge{se->real_edge} : INVALID_EDGE; }
+
+        uint32_t numberOfNodes() const {
+            return t_.view_.skeletonNumNodes[tn_.idx];
+        }
+        uint32_t numberOfEdges() const {
+            return t_.view_.skeletonOffsets[tn_.idx + 1] - t_.view_.skeletonOffsets[tn_.idx];
+        }
+
+        template<typename F>
+        void forEachEdge(F&& f) const {
+            const auto& view = t_.view_;
+            const uint32_t off = view.skeletonOffsets[tn_.idx];
+            const uint32_t end = view.skeletonOffsets[tn_.idx + 1];
+            const uint32_t mapOff = view.nodeMappingOffsets[tn_.idx];
+            const Graph* gccGraph = t_.gccGraph_;
+            for (uint32_t i = off; i < end; ++i) {
+                const auto& se = view.skeletonEdges[i];
+                uint32_t s = se.src, d = se.dst;
+                if (se.real_edge != UINT32_MAX && gccGraph != nullptr) {
+                    auto gSrc = gccGraph->source(edge{se.real_edge});
+                    if (view.nodeMapping[mapOff + s] != gSrc.idx) {
+                        uint32_t tmp = s; s = d; d = tmp;
+                    }
+                }
+                f(edge{i}, node{s}, node{d});
+            }
+        }
     };
     
     Skeleton skeleton(tree_node tn) const { return Skeleton(*this, tn); }
@@ -672,10 +694,6 @@ inline uint32_t connectedComponents(const Graph& g, NA& comp) {
     return cc.count();
 }
 
-// spqr::ogdf_compat
-
-// Same API but edge carries a pointer to its graph, so e->source() works.
-// Costs 12 extra bytes per edge
 
 namespace ogdf_compat {
 
@@ -1182,6 +1200,9 @@ public:
     NodeType typeOf(tree_node tn) const { return view_.nodeTypes[tn.idx] == 0 ? NodeType::SNode : view_.nodeTypes[tn.idx] == 1 ? NodeType::PNode : NodeType::RNode; }
     const TreeGraph& tree() const { return tree_; }
     tree_node parent(tree_node tn) const { return node{parents_[tn.idx]}; }
+
+    // V2: expose flat view for zero-alloc direct iteration.
+    const spqr_rust::SpqrTreeFlatView& flatView() const { return view_; }
     
     class SkeletonGraph {
         const spqr_rust::SpqrTreeFlatView& view_;
@@ -1285,6 +1306,26 @@ public:
         bool isVirtual(edge e) const { return edgeAt(e)->real_edge == UINT32_MAX; }
         tree_node twinTreeNode(edge e) const { auto* se = edgeAt(e); return se->real_edge == UINT32_MAX ? node{se->twin_tree_node} : INVALID_NODE; }
         edge realEdge(edge e) const { auto* se = edgeAt(e); return se->real_edge != UINT32_MAX ? edge{se->real_edge} : INVALID_EDGE; }
+
+        // V2 zero-alloc accessors (added 2026-04-23). Same semantics as
+        // this namespace's SkeletonGraph::source/target (no reorientation).
+        uint32_t numberOfNodes() const {
+            return t_.view_.skeletonNumNodes[tn_.idx];
+        }
+        uint32_t numberOfEdges() const {
+            return t_.view_.skeletonOffsets[tn_.idx + 1] - t_.view_.skeletonOffsets[tn_.idx];
+        }
+
+        template<typename F>
+        void forEachEdge(F&& f) const {
+            const auto& view = t_.view_;
+            const uint32_t off = view.skeletonOffsets[tn_.idx];
+            const uint32_t end = view.skeletonOffsets[tn_.idx + 1];
+            for (uint32_t i = off; i < end; ++i) {
+                const auto& se = view.skeletonEdges[i];
+                f(edge{i}, node{se.src}, node{se.dst});
+            }
+        }
     };
     
     Skeleton skeleton(tree_node tn) const { return Skeleton(*this, tn); }
