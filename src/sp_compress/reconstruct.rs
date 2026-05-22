@@ -1349,7 +1349,8 @@ impl Builder {
 
         if absorbed_present {
             let vid_count = self.next_vid as usize;
-            let mut vid_to_local: Vec<u32> = vec![u32::MAX; vid_count];
+            let empty = (u32::MAX, u32::MAX);
+            let mut vid_to_edge: Vec<[(u32, u32); 2]> = vec![[empty; 2]; vid_count];
 
             for tn_new in 0..n_new {
                 let s = skeleton_offsets[tn_new] as usize;
@@ -1359,8 +1360,14 @@ impl Builder {
                     if edge.virtual_id != INVALID && edge.twin_tree_node.is_valid() {
                         let idx = edge.virtual_id as usize;
 
-                        if idx < vid_to_local.len() {
-                            vid_to_local[idx] = local_idx as u32;
+                        if idx < vid_to_edge.len() {
+                            let pair = &mut vid_to_edge[idx];
+                            let here = (tn_new as u32, local_idx as u32);
+                            if pair[0] == empty {
+                                pair[0] = here;
+                            } else if pair[0] != here && pair[1] == empty {
+                                pair[1] = here;
+                            }
                         }
                     }
                 }
@@ -1377,8 +1384,14 @@ impl Builder {
 
                     let idx = edge.virtual_id as usize;
 
-                    if idx < vid_to_local.len() && vid_to_local[idx] != u32::MAX {
-                        edge.twin_edge_idx = vid_to_local[idx];
+                    if idx < vid_to_edge.len() {
+                        let pair = vid_to_edge[idx];
+                        let twin = edge.twin_tree_node.0;
+                        if pair[0].0 == twin {
+                            edge.twin_edge_idx = pair[0].1;
+                        } else if pair[1].0 == twin {
+                            edge.twin_edge_idx = pair[1].1;
+                        }
                     }
                 }
             }
