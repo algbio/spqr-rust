@@ -95,6 +95,11 @@ fn compress_borrowed_impl(
         };
     }
 
+    let n_nodes_usize = n_nodes as usize;
+    let mut node_dirty: Vec<NodeId> = Vec::new();
+    let mut node_in_dirty: Vec<u64> = vec![0; n_nodes_usize.div_ceil(64)];
+    let mut pair_dirty: Vec<PairKey> = Vec::new();
+
     let t_init_work = Instant::now();
 
     let mut arena = PNodeArena::new();
@@ -103,7 +108,7 @@ fn compress_borrowed_impl(
     let mut adj = AdjStore::new();
 
     let mut pmap = FlatPairMap::new();
-    pmap.init(input_edges.len() + 16);
+    let mut pmap_ready = false;
 
     let pnode_start = arena.bulk_init_atomic(input_edges);
 
@@ -128,45 +133,28 @@ fn compress_borrowed_impl(
             bucket_next: u32::MAX,
         });
 
+        enqueue_dirty_if_degree_two(
+            ie.u,
+            &adj,
+            &mut node_dirty,
+            &mut node_in_dirty,
+            contractible,
+            n_nodes_usize,
+        );
         if ie.u != ie.v {
-            let k = make_pair_key(ie.u, ie.v);
-            let r = pmap.on_seen(k, edge_idx);
-            apply_on_seen(r, edge_idx, &mut edges);
+            enqueue_dirty_if_degree_two(
+                ie.v,
+                &adj,
+                &mut node_dirty,
+                &mut node_in_dirty,
+                contractible,
+                n_nodes_usize,
+            );
         }
     }
     add_timing!(t_init_work_us, t_init_work);
 
     let t_init_dirty = Instant::now();
-    let mut node_dirty: Vec<NodeId> = Vec::new();
-    let mut node_in_dirty: Vec<u64> = vec![0; (n_nodes as usize).div_ceil(64)];
-
-    let n_nodes = n_nodes as usize;
-
-    for v_idx in 0..n_nodes {
-        let v = NodeId(v_idx as u32);
-        if contractible[v_idx] != 0 && adj.deg[v_idx] == 2 {
-            let bit = 1u64 << (v_idx & 63);
-            let w = &mut node_in_dirty[v_idx >> 6];
-            if (*w & bit) == 0 {
-                *w |= bit;
-                node_dirty.push(v);
-            }
-        }
-    }
-
-    let mut pair_dirty: Vec<PairKey> = Vec::new();
-
-    if !pmap.buckets.is_empty() {
-        for slot in pmap.slots.iter() {
-            let v = slot.value;
-            if FlatPairMap::is_indirect(v) {
-                let bid = FlatPairMap::bucket_index(v) as usize;
-                if pmap.buckets[bid].count >= 2 {
-                    pair_dirty.push(slot.key);
-                }
-            }
-        }
-    }
     add_timing!(t_init_dirty_us, t_init_dirty);
 
     let mut series_reductions: u32 = 0;
@@ -174,8 +162,9 @@ fn compress_borrowed_impl(
 
     let mut bucket_edges_buf: Vec<u32> = Vec::with_capacity(64);
     let mut kid_pnodes_buf: Vec<u32> = Vec::with_capacity(64);
+    let mut flat_pnodes_buf: Vec<u32> = Vec::with_capacity(64);
 
-    while !node_dirty.is_empty() || !pair_dirty.is_empty() {
+    while !node_dirty.is_empty() || !pair_dirty.is_empty() || !pmap_ready {
         let t_reduce_series = Instant::now();
         while let Some(v) = node_dirty.pop() {
             let v_idx = v.idx();
@@ -235,26 +224,28 @@ fn compress_borrowed_impl(
                 &mut edges,
                 &mut adj,
                 &mut pmap,
+                pmap_ready,
                 &mut node_dirty,
                 &mut node_in_dirty,
                 &mut pair_dirty,
                 contractible,
-                n_nodes,
+                n_nodes_usize,
             );
             series_reductions += 1;
         }
         add_timing!(t_reduce_series_us, t_reduce_series);
 
         let t_reduce_parallel = Instant::now();
+        if !pmap_ready {
+            rebuild_pair_map_from_active_edges(&mut pmap, &mut edges, &mut pair_dirty);
+            pmap_ready = true;
+        }
         while let Some(k) = pair_dirty.pop() {
-            bucket_compact(&mut pmap, &mut edges, k);
-
-            let bid_opt = pmap.find_bucket(k);
-            let bid = match bid_opt {
+            let bid = match bucket_compact(&mut pmap, &mut edges, k) {
                 Some(b) => b,
                 None => continue,
             };
-            if pmap.buckets[bid as usize].count < 2 {
+            if pmap.buckets[bid as usize].live_count() < 2 {
                 continue;
             }
 
@@ -281,7 +272,8 @@ fn compress_borrowed_impl(
                 kid_pnodes_buf.push(edges[idx as usize].pnode);
             }
 
-            let merged = arena.make_parallel(a, c, &kid_pnodes_buf);
+            let merged =
+                arena.make_parallel_with_scratch(a, c, &kid_pnodes_buf, &mut flat_pnodes_buf);
 
             for &idx in &bucket_edges_buf {
                 let (eu, ev, eau, eav) = {
@@ -303,11 +295,12 @@ fn compress_borrowed_impl(
                 &mut edges,
                 &mut adj,
                 &mut pmap,
+                true,
                 &mut node_dirty,
                 &mut node_in_dirty,
                 &mut pair_dirty,
                 contractible,
-                n_nodes,
+                n_nodes_usize,
             );
             parallel_reductions += 1;
         }
@@ -315,12 +308,13 @@ fn compress_borrowed_impl(
     }
 
     let t_materialize = Instant::now();
-    let mut node_used: Vec<u64> = vec![0u64; n_nodes.div_ceil(64)];
+    let mut node_used: Vec<u64> = vec![0u64; n_nodes_usize.div_ceil(64)];
 
     tree.children.reserve(input_edges.len());
 
     let mut mat_stack: Vec<(u32, u8)> = Vec::with_capacity(64);
     let mut mat_resolved: Vec<ChildRef> = Vec::with_capacity(64);
+    let mut mat_sort_keys: Vec<(u32, u32, ChildRef)> = Vec::with_capacity(64);
 
     for i in 0..edges.len() {
         let (epn, mut ce_u, mut ce_v) = {
@@ -341,6 +335,7 @@ fn compress_borrowed_impl(
             &mut tree,
             &mut mat_stack,
             &mut mat_resolved,
+            &mut mat_sort_keys,
         );
 
         if ce_u.0 > ce_v.0 {
@@ -377,7 +372,7 @@ fn compress_borrowed_impl(
     add_timing!(t_sort_core_edges_us, t_sort_core_edges);
 
     let t_collect_core_nodes = Instant::now();
-    for v_idx in 0..n_nodes {
+    for v_idx in 0..n_nodes_usize {
         if (node_used[v_idx >> 6] & (1u64 << (v_idx & 63))) != 0 {
             tree.core_nodes.push(NodeId(v_idx as u32));
         }
@@ -397,11 +392,6 @@ fn compress_borrowed_impl(
 
     tree.update_stats();
 
-    tree.macros.shrink_to_fit();
-    tree.children.shrink_to_fit();
-    tree.core_edges.shrink_to_fit();
-    tree.core_nodes.shrink_to_fit();
-    tree.input_endpoints.shrink_to_fit();
     add_timing!(t_stats_shrink_us, t_stats_shrink);
 
     CompressionResult {
@@ -420,17 +410,76 @@ fn apply_on_seen(
     use crate::sp_compress::pmap::OnSeenResult;
     match result {
         OnSeenResult::SingleStored => {}
-        OnSeenResult::InsertedFirst { bucket_next } => {
+        OnSeenResult::InsertedFirst { bucket_next, .. } => {
             edges[edge_idx as usize].bucket_next = bucket_next;
         }
         OnSeenResult::PromotedAndInserted {
             promoted_edge,
             bucket_next,
+            ..
         } => {
             edges[promoted_edge as usize].bucket_next = u32::MAX;
 
             edges[edge_idx as usize].bucket_next = bucket_next;
         }
+    }
+}
+
+#[inline]
+fn enqueue_dirty_if_degree_two(
+    w: NodeId,
+    adj: &AdjStore,
+    node_dirty: &mut Vec<NodeId>,
+    node_in_dirty: &mut [u64],
+    contractible: &[u8],
+    n_nodes: usize,
+) {
+    let wi = w.idx();
+    if wi >= n_nodes {
+        return;
+    }
+    if contractible[wi] == 0 {
+        return;
+    }
+    if adj.deg[wi] != 2 {
+        return;
+    }
+    let bit = 1u64 << (wi & 63);
+    if (node_in_dirty[wi >> 6] & bit) != 0 {
+        return;
+    }
+    node_in_dirty[wi >> 6] |= bit;
+    node_dirty.push(w);
+}
+
+fn rebuild_pair_map_from_active_edges(
+    pmap: &mut FlatPairMap,
+    edges: &mut [WorkEdge],
+    pair_dirty: &mut Vec<PairKey>,
+) {
+    let active_non_loop = edges
+        .iter()
+        .filter(|e| e.pnode != INVALID_PNODE && e.u != e.v)
+        .count();
+    pmap.init(active_non_loop + 16);
+    pair_dirty.clear();
+
+    for idx in 0..edges.len() {
+        let (active, u, v) = {
+            let e = &mut edges[idx];
+            e.bucket_next = u32::MAX;
+            (e.pnode != INVALID_PNODE && e.u != e.v, e.u, e.v)
+        };
+        if !active {
+            continue;
+        }
+
+        let k = make_pair_key(u, v);
+        let r = pmap.on_seen(k, idx as u32);
+        if r.schedule_dirty() {
+            pair_dirty.push(k);
+        }
+        apply_on_seen(r, idx as u32, edges);
     }
 }
 
@@ -443,6 +492,7 @@ fn add_new_edge(
     edges: &mut Vec<WorkEdge>,
     adj: &mut AdjStore,
     pmap: &mut FlatPairMap,
+    track_pairs: bool,
     node_dirty: &mut Vec<NodeId>,
     node_in_dirty: &mut [u64],
     pair_dirty: &mut Vec<PairKey>,
@@ -465,53 +515,27 @@ fn add_new_edge(
         bucket_next: u32::MAX,
     });
 
-    if u != v {
+    if track_pairs && u != v {
         let k = make_pair_key(u, v);
         let r = pmap.on_seen(k, idx);
-
-        let needs_pair_dirty = matches!(
-            r,
-            crate::sp_compress::pmap::OnSeenResult::PromotedAndInserted { .. }
-                | crate::sp_compress::pmap::OnSeenResult::InsertedFirst { .. }
-        );
-        apply_on_seen(r, idx, edges);
-        if needs_pair_dirty {
+        if r.schedule_dirty() {
             pair_dirty.push(k);
         }
+        apply_on_seen(r, idx, edges);
     }
 
-    let try_enq = |w: NodeId, node_dirty: &mut Vec<NodeId>, node_in_dirty: &mut [u64]| {
-        let wi = w.idx();
-        if wi >= n_nodes {
-            return;
-        }
-        if contractible[wi] == 0 {
-            return;
-        }
-        if adj.deg[wi] != 2 {
-            return;
-        }
-        let bit = 1u64 << (wi & 63);
-        if (node_in_dirty[wi >> 6] & bit) != 0 {
-            return;
-        }
-        node_in_dirty[wi >> 6] |= bit;
-        node_dirty.push(w);
-    };
-    try_enq(u, node_dirty, node_in_dirty);
+    enqueue_dirty_if_degree_two(u, adj, node_dirty, node_in_dirty, contractible, n_nodes);
     if u != v {
-        try_enq(v, node_dirty, node_in_dirty);
+        enqueue_dirty_if_degree_two(v, adj, node_dirty, node_in_dirty, contractible, n_nodes);
     }
 
     idx
 }
 
 #[inline]
-fn bucket_compact(pmap: &mut FlatPairMap, edges: &mut [WorkEdge], k: PairKey) {
-    let bid = match pmap.find_bucket(k) {
-        Some(b) => b,
-        None => return,
-    };
+fn bucket_compact(pmap: &mut FlatPairMap, edges: &mut [WorkEdge], k: PairKey) -> Option<u32> {
+    let bid = pmap.find_bucket(k)?;
+    pmap.mark_bucket_clean(bid);
     let bid_us = bid as usize;
     let mut cur = pmap.buckets[bid_us].head;
     let mut new_head: u32 = u32::MAX;
@@ -527,10 +551,12 @@ fn bucket_compact(pmap: &mut FlatPairMap, edges: &mut [WorkEdge], k: PairKey) {
         cur = nxt;
     }
     pmap.buckets[bid_us].head = new_head;
-    pmap.buckets[bid_us].count = kept;
+    pmap.buckets[bid_us].set_live_count(kept);
     if kept == 0 {
         pmap.erase_pair(k);
+        return None;
     }
+    Some(bid)
 }
 
 fn materialize(
@@ -539,6 +565,7 @@ fn materialize(
     tree: &mut SpTree,
     mat_stack: &mut Vec<(u32, u8)>,
     mat_resolved: &mut Vec<ChildRef>,
+    mat_sort_keys: &mut Vec<(u32, u32, ChildRef)>,
 ) -> ChildRef {
     mat_stack.clear();
     mat_stack.push((root_pnode, 0));
@@ -580,49 +607,41 @@ fn materialize(
             c = next;
         }
 
-        if kind == PK_PARALLEL {
+        if kind == PK_PARALLEL && mat_resolved.len() > 1 {
             let macros_snapshot: &[SpNode] = &tree.macros;
             let children_snapshot: &[ChildRef] = &tree.children;
-            mat_resolved.sort_unstable_by(|&ra, &rb| {
-                let ka: u32 = if child_is_edge(ra) {
-                    0
-                } else {
-                    macros_snapshot[child_as_macro(ra) as usize].kind as u32
-                };
-                let kb: u32 = if child_is_edge(rb) {
-                    0
-                } else {
-                    macros_snapshot[child_as_macro(rb) as usize].kind as u32
-                };
-                if ka != kb {
-                    return ka.cmp(&kb);
+            let first_edge_of = |r: ChildRef| -> u32 {
+                if child_is_edge(r) {
+                    return child_as_edge(r).0;
                 }
+                let mut cur = r;
+                while child_is_macro(cur) {
+                    let m = &macros_snapshot[child_as_macro(cur) as usize];
+                    if m.children_count == 0 {
+                        return EdgeId::INVALID.0;
+                    }
+                    cur = children_snapshot[m.children_offset as usize];
+                }
+                if child_is_edge(cur) {
+                    child_as_edge(cur).0
+                } else {
+                    EdgeId::INVALID.0
+                }
+            };
 
-                let first_edge_of = |r: ChildRef| -> EdgeId {
-                    if child_is_edge(r) {
-                        return child_as_edge(r);
-                    }
-                    let mut cur = r;
-                    while child_is_macro(cur) {
-                        let m = &macros_snapshot[child_as_macro(cur) as usize];
-                        if m.children_count == 0 {
-                            return EdgeId::INVALID;
-                        }
-                        cur = children_snapshot[m.children_offset as usize];
-                    }
-                    if child_is_edge(cur) {
-                        child_as_edge(cur)
-                    } else {
-                        EdgeId::INVALID
-                    }
+            mat_sort_keys.clear();
+            mat_sort_keys.reserve(mat_resolved.len());
+            for &r in mat_resolved.iter() {
+                let kind_key = if child_is_edge(r) {
+                    0
+                } else {
+                    macros_snapshot[child_as_macro(r) as usize].kind as u32
                 };
-                let ea = first_edge_of(ra);
-                let eb = first_edge_of(rb);
-                if ea != eb {
-                    return ea.cmp(&eb);
-                }
-                ra.cmp(&rb)
-            });
+                mat_sort_keys.push((kind_key, first_edge_of(r), r));
+            }
+            mat_sort_keys.sort_unstable();
+            mat_resolved.clear();
+            mat_resolved.extend(mat_sort_keys.iter().map(|&(_, _, r)| r));
         }
 
         let children_offset = tree.children.len() as u32;

@@ -1,5 +1,6 @@
 pub mod adj;
 pub mod arena;
+pub mod direct;
 #[allow(unsafe_code)]
 pub mod ffi;
 pub mod integration;

@@ -22,6 +22,7 @@ typedef struct {
 #define SP_COMPRESS_KIND_SERIES   1
 #define SP_COMPRESS_KIND_PARALLEL 2
 
+
 typedef struct {
     uint8_t  kind;
     uint8_t  _pad[3];
@@ -36,6 +37,7 @@ typedef struct {
     uint32_t v;
     uint32_t child;
 } SpCompressCoreEdge;
+
 
 #define SP_COMPRESS_TAG_BIT      0x80000000u
 #define SP_COMPRESS_PAYLOAD_MASK 0x7FFFFFFFu
@@ -76,8 +78,128 @@ typedef struct {
     const uint32_t* input_endpoints_ptr;
     uint32_t input_endpoints_len;
 
+
     SpCompressStats stats;
 } SpCompressTreeView;
+
+typedef struct {
+    uint32_t raw_component_id;
+    uint8_t  kind;
+    uint8_t  _pad[3];
+    uint32_t edge_begin;
+    uint32_t edge_end;
+    uint32_t inc_begin;
+    uint32_t inc_end;
+    uint32_t node_begin;
+    uint32_t node_end;
+} FfiScadComponent;
+
+typedef struct {
+    uint8_t  kind;
+    uint8_t  _pad[3];
+    uint32_t src_local;
+    uint32_t dst_local;
+    uint32_t src_core;
+    uint32_t dst_core;
+    uint32_t original_edge_id;
+    uint32_t macro_id;
+    uint32_t virtual_id;
+} FfiScadEdge;
+
+typedef struct {
+    uint32_t virtual_id;
+    uint32_t component_id;
+    uint32_t local_edge_id;
+    uint32_t twin_incidence;
+    uint32_t sep_u;
+    uint32_t sep_v;
+} FfiScadIncidence;
+
+typedef struct {
+    const FfiScadComponent* components_ptr;
+    uint32_t components_len;
+    const FfiScadEdge* edges_ptr;
+    uint32_t edges_len;
+    const FfiScadIncidence* incidences_ptr;
+    uint32_t incidences_len;
+    const uint32_t* node_mapping_ptr;
+    uint32_t node_mapping_len;
+} CoreScadView;
+
+#define SPQRA_MIN_EDGE_VIRTUAL       (1u << 1)
+#define SPQRA_MIN_EDGE_HAS_CHILD_REF (1u << 3)
+#define SPQRA_MIN_EDGE_HAS_BEHAVIOR_ATOM (1u << 6)
+
+#define SPQRA_MIN_ATOM_ITEM_CHILD_REF     (1u << 0)
+#define SPQRA_MIN_ATOM_ITEM_BEHAVIOR_ATOM (1u << 1)
+
+typedef struct {
+    uint8_t  kind;
+    uint8_t  _pad[3];
+    uint32_t raw_component_id;
+    uint32_t parent;
+    uint32_t child_begin;
+    uint32_t child_end;
+    uint32_t edge_begin;
+    uint32_t edge_end;
+    uint32_t inc_begin;
+    uint32_t inc_end;
+    uint32_t node_begin;
+    uint32_t node_end;
+    uint32_t port0_core;
+    uint32_t port1_core;
+} FfiSpqraMinimizerComponent;
+
+typedef struct {
+    uint32_t twin_component;
+    uint32_t twin_local_edge;
+    uint32_t child_ref;
+    uint32_t flags;
+    uint32_t src_local;
+    uint32_t dst_local;
+} FfiSpqraMinimizerEdge;
+
+typedef struct {
+    uint32_t root;
+    uint32_t bad_twin_count;
+} FfiSpqraMinimizerSummary;
+
+typedef struct {
+    uint8_t  kind;
+    uint8_t  _pad[3];
+    uint32_t item_begin;
+    uint32_t item_end;
+    uint32_t port0_core;
+    uint32_t port1_core;
+} FfiSpqraBehaviorAtom;
+
+typedef struct {
+    uint32_t child_ref;
+    uint32_t flags;
+    uint32_t src_core;
+    uint32_t dst_core;
+} FfiSpqraBehaviorAtomItem;
+
+typedef struct {
+    const FfiSpqraMinimizerComponent* components_ptr;
+    uint32_t components_len;
+    const FfiSpqraMinimizerEdge* edges_ptr;
+    uint32_t edges_len;
+    const uint32_t* node_mapping_ptr;
+    uint32_t node_mapping_len;
+    const uint32_t* children_ptr;
+    uint32_t children_len;
+    const uint32_t* postorder_ptr;
+    uint32_t postorder_len;
+    FfiSpqraMinimizerSummary summary;
+} SpqraMinimizerView;
+
+typedef struct {
+    const FfiSpqraBehaviorAtom* atoms_ptr;
+    uint32_t atoms_len;
+    const FfiSpqraBehaviorAtomItem* items_ptr;
+    uint32_t items_len;
+} SpqraBehaviorAtomView;
 
 SpCompressHandle* sp_compress_ffi(
     uint32_t n_nodes,
@@ -95,6 +217,11 @@ uint8_t sp_compress_success(const SpCompressHandle* handle);
 SpCompressTreeView sp_compress_get_tree(const SpCompressHandle* handle);
 
 const SpqrTree* sp_compress_get_core_spqr(const SpCompressHandle* handle);
+
+CoreScadView sp_compress_get_core_scad_export(const SpCompressHandle* handle);
+
+SpqraMinimizerView sp_compress_get_spqra_minimizer_view(const SpCompressHandle* handle);
+SpqraBehaviorAtomView sp_compress_get_spqra_behavior_atom_view(const SpCompressHandle* handle);
 
 const uint32_t* sp_compress_core_node_inv(const SpCompressHandle* handle, uint32_t* out_len);
 
@@ -157,6 +284,19 @@ typedef struct {
 
     uint64_t t_spqr_assemble_us;
     uint64_t t_spqr_tree_total_us;
+
+    uint64_t c_spqr_multi_components;
+    uint64_t c_spqr_triconn_components;
+    uint64_t c_spqr_precombine_components;
+    uint64_t c_spqr_combined_components;
+    uint64_t c_spqr_merged_components;
+    uint64_t c_spqr_merged_real_edges;
+    uint64_t c_spqr_merged_virtual_incidences;
+    uint64_t c_spqr_virtual_id_span;
+    uint64_t c_spqr_tree_nodes;
+    uint64_t c_spqr_tree_edges;
+    uint64_t c_spqr_tree_skeleton_edges;
+    uint64_t c_spqr_tree_virtual_incidences;
 } SpCompressTimings;
 
 SpCompressHandle* sp_compress_timed_ffi(
@@ -167,6 +307,16 @@ SpCompressHandle* sp_compress_timed_ffi(
     uint32_t contractible_len,
     uint8_t build_core_spqr,
     SpCompressTimings* out_timings);
+
+SpCompressHandle* sp_compress_indexed_ffi(
+    uint32_t n_nodes,
+    const uint32_t* src_ptr,
+    const uint32_t* dst_ptr,
+    uint32_t edges_len,
+    const uint8_t* contractible_ptr,
+    uint32_t contractible_len,
+    uint8_t build_core_spqr);
+
 
 struct SpqrResult* sp_compress_reconstruct_with_timings_ffi(
     uint32_t n_nodes,

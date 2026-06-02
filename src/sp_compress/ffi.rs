@@ -1,11 +1,17 @@
 #![allow(clippy::missing_safety_doc)]
 
-use crate::sp_compress::integration::{compress_and_build_spqr_borrowed, CompressAndSpqrResult};
+use crate::sp_compress::direct::try_compress_degree2_direct_indexed;
+use crate::sp_compress::integration::{
+    build_core_spqr_parts_fast, core_edges_have_no_non_loop_parallel, CompressAndSpqrResult,
+    CoreNodeMapper, FfiScadComponent, FfiScadEdge, FfiScadIncidence, FfiSpqraBehaviorAtom,
+    FfiSpqraBehaviorAtomItem, FfiSpqraMinimizerComponent, FfiSpqraMinimizerEdge,
+    FfiSpqraMinimizerSummary,
+};
 use crate::sp_compress::reduction::{
     compress_borrowed, compress_borrowed_timed, CompressionTimings,
 };
 use crate::sp_compress::types::{ChildRef, CompressionStats, CoreEdge, InputEdge, SpNode, SpTree};
-use crate::NodeId;
+use crate::{EdgeId, NodeId};
 use std::ptr;
 use std::slice;
 use std::time::Instant;
@@ -57,6 +63,19 @@ pub struct SpCompressTimings {
     pub t_spqr_merge_us: u64,
     pub t_spqr_assemble_us: u64,
     pub t_spqr_tree_total_us: u64,
+
+    pub c_spqr_multi_components: u64,
+    pub c_spqr_triconn_components: u64,
+    pub c_spqr_precombine_components: u64,
+    pub c_spqr_combined_components: u64,
+    pub c_spqr_merged_components: u64,
+    pub c_spqr_merged_real_edges: u64,
+    pub c_spqr_merged_virtual_incidences: u64,
+    pub c_spqr_virtual_id_span: u64,
+    pub c_spqr_tree_nodes: u64,
+    pub c_spqr_tree_edges: u64,
+    pub c_spqr_tree_skeleton_edges: u64,
+    pub c_spqr_tree_virtual_incidences: u64,
 }
 
 fn fill_production_reconstruct_timings(
@@ -114,6 +133,88 @@ pub struct MacroTreeFfi {
     pub stats: CompressionStats,
 }
 
+#[repr(C)]
+pub struct CoreScadFfi {
+    pub components_ptr: *const FfiScadComponent,
+    pub components_len: u32,
+    pub edges_ptr: *const FfiScadEdge,
+    pub edges_len: u32,
+    pub incidences_ptr: *const FfiScadIncidence,
+    pub incidences_len: u32,
+    pub node_mapping_ptr: *const u32,
+    pub node_mapping_len: u32,
+}
+
+#[repr(C)]
+pub struct SpqraMinimizerView {
+    pub components_ptr: *const FfiSpqraMinimizerComponent,
+    pub components_len: u32,
+    pub edges_ptr: *const FfiSpqraMinimizerEdge,
+    pub edges_len: u32,
+    pub node_mapping_ptr: *const u32,
+    pub node_mapping_len: u32,
+    pub children_ptr: *const u32,
+    pub children_len: u32,
+    pub postorder_ptr: *const u32,
+    pub postorder_len: u32,
+    pub summary: FfiSpqraMinimizerSummary,
+}
+
+#[repr(C)]
+pub struct SpqraBehaviorAtomView {
+    pub atoms_ptr: *const FfiSpqraBehaviorAtom,
+    pub atoms_len: u32,
+    pub items_ptr: *const FfiSpqraBehaviorAtomItem,
+    pub items_len: u32,
+}
+
+impl SpqraBehaviorAtomView {
+    fn empty() -> Self {
+        Self {
+            atoms_ptr: ptr::null(),
+            atoms_len: 0,
+            items_ptr: ptr::null(),
+            items_len: 0,
+        }
+    }
+}
+
+impl SpqraMinimizerView {
+    fn empty() -> Self {
+        Self {
+            components_ptr: ptr::null(),
+            components_len: 0,
+            edges_ptr: ptr::null(),
+            edges_len: 0,
+            node_mapping_ptr: ptr::null(),
+            node_mapping_len: 0,
+            children_ptr: ptr::null(),
+            children_len: 0,
+            postorder_ptr: ptr::null(),
+            postorder_len: 0,
+            summary: FfiSpqraMinimizerSummary {
+                root: crate::INVALID,
+                ..FfiSpqraMinimizerSummary::default()
+            },
+        }
+    }
+}
+
+impl CoreScadFfi {
+    fn empty() -> Self {
+        Self {
+            components_ptr: ptr::null(),
+            components_len: 0,
+            edges_ptr: ptr::null(),
+            edges_len: 0,
+            incidences_ptr: ptr::null(),
+            incidences_len: 0,
+            node_mapping_ptr: ptr::null(),
+            node_mapping_len: 0,
+        }
+    }
+}
+
 pub enum SpCompressHandle {
     PlainTree { tree: SpTree, success: bool },
     WithSpqr(Box<CompressAndSpqrResult>),
@@ -141,20 +242,15 @@ fn build_core_spqr_timed(
     macro_tree: &SpTree,
     timings: &mut SpCompressTimings,
     fill_spqr_timings: bool,
+    skip_assemble: bool,
 ) -> (Option<crate::SpqrResult>, Vec<u32>, Vec<NodeId>) {
     if macro_tree.stats.fully_sp_reducible != 0 || macro_tree.core_edges.is_empty() {
         return (None, Vec::new(), Vec::new());
     }
 
     let t_remap = Instant::now();
-    let n_orig = n_nodes as usize;
-    let mut remap = vec![u32::MAX; n_orig];
-    let mut inv: Vec<NodeId> = Vec::with_capacity(macro_tree.core_nodes.len());
-
-    for v in &macro_tree.core_nodes {
-        remap[v.idx()] = inv.len() as u32;
-        inv.push(*v);
-    }
+    let inv: &[NodeId] = &macro_tree.core_nodes;
+    let mapper = CoreNodeMapper::new(n_nodes as usize, inv);
 
     timings.t_core_remap_us = t_remap.elapsed().as_micros() as u64;
 
@@ -165,38 +261,74 @@ fn build_core_spqr_timed(
     let mut graph = crate::Graph::with_capacity(n_core, m_core);
     graph.add_nodes_fast(n_core);
 
+    let mut has_self_loop = false;
     for ce in &macro_tree.core_edges {
-        let u_remap = remap[ce.u as usize];
-        let v_remap = remap[ce.v as usize];
-
-        debug_assert!(u_remap != u32::MAX);
-        debug_assert!(v_remap != u32::MAX);
-
+        let u_remap = mapper.lookup(inv, ce.u);
+        let v_remap = mapper.lookup(inv, ce.v);
+        has_self_loop |= u_remap == v_remap;
         graph.add_edge(NodeId(u_remap), NodeId(v_remap));
     }
 
     timings.t_core_graph_build_us = t_graph.elapsed().as_micros() as u64;
 
     let t_spqr = Instant::now();
-    let spqr = if fill_spqr_timings {
-        let (spqr, st) = crate::build_spqr_raw_timed(&graph);
-        timings.t_spqr_self_loop_scan_us = st.t_self_loop_scan_us;
-        timings.t_spqr_precheck_us = st.t_precheck_us;
-        timings.t_spqr_split_multi_edges_us = st.t_split_multi_edges_us;
-        timings.t_spqr_work_graph_us = st.t_work_graph_us;
-        timings.t_spqr_triconn_us = st.t_triconn_us;
-        timings.t_spqr_relabel_us = st.t_relabel_us;
-        timings.t_spqr_combine_us = st.t_combine_us;
-        timings.t_spqr_merge_us = st.t_merge_us;
-        timings.t_spqr_assemble_us = st.t_assemble_us;
-        timings.t_spqr_tree_total_us = st.t_tree_total_us;
-        spqr
+    let no_non_loop_parallel = core_edges_have_no_non_loop_parallel(macro_tree);
+    let core_child_refs = if crate::sp_compress::integration::wants_spqra_minimizer_sidecar() {
+        Some(
+            macro_tree
+                .core_edges
+                .iter()
+                .map(|ce| ce.child)
+                .collect::<Vec<_>>(),
+        )
     } else {
-        crate::build_spqr_raw(&graph)
+        None
     };
+    let spqr = crate::with_spqra_core_child_refs(core_child_refs, || {
+        crate::with_skip_assemble_spqr(skip_assemble, || {
+            if fill_spqr_timings {
+                let (spqr, st) = if no_non_loop_parallel {
+                    crate::build_spqr_raw_no_multi_edges_timed(&graph)
+                } else if has_self_loop {
+                    crate::build_spqr_raw_timed(&graph)
+                } else {
+                    crate::build_spqr_raw_no_self_loops_timed(&graph)
+                };
+                timings.t_spqr_self_loop_scan_us = st.t_self_loop_scan_us;
+                timings.t_spqr_precheck_us = st.t_precheck_us;
+                timings.t_spqr_split_multi_edges_us = st.t_split_multi_edges_us;
+                timings.t_spqr_work_graph_us = st.t_work_graph_us;
+                timings.t_spqr_triconn_us = st.t_triconn_us;
+                timings.t_spqr_relabel_us = st.t_relabel_us;
+                timings.t_spqr_combine_us = st.t_combine_us;
+                timings.t_spqr_merge_us = st.t_merge_us;
+                timings.t_spqr_assemble_us = st.t_assemble_us;
+                timings.t_spqr_tree_total_us = st.t_tree_total_us;
+                timings.c_spqr_multi_components = st.c_multi_components;
+                timings.c_spqr_triconn_components = st.c_triconn_components;
+                timings.c_spqr_precombine_components = st.c_precombine_components;
+                timings.c_spqr_combined_components = st.c_combined_components;
+                timings.c_spqr_merged_components = st.c_merged_components;
+                timings.c_spqr_merged_real_edges = st.c_merged_real_edges;
+                timings.c_spqr_merged_virtual_incidences = st.c_merged_virtual_incidences;
+                timings.c_spqr_virtual_id_span = st.c_virtual_id_span;
+                timings.c_spqr_tree_nodes = st.c_tree_nodes;
+                timings.c_spqr_tree_edges = st.c_tree_edges;
+                timings.c_spqr_tree_skeleton_edges = st.c_tree_skeleton_edges;
+                timings.c_spqr_tree_virtual_incidences = st.c_tree_virtual_incidences;
+                spqr
+            } else if no_non_loop_parallel {
+                crate::build_spqr_raw_no_multi_edges(&graph)
+            } else if has_self_loop {
+                crate::build_spqr_raw(&graph)
+            } else {
+                crate::build_spqr_raw_no_self_loops(&graph)
+            }
+        })
+    });
     timings.t_core_spqr_raw_us = t_spqr.elapsed().as_micros() as u64;
 
-    (Some(spqr), remap, inv)
+    (Some(spqr), Vec::new(), Vec::new())
 }
 
 #[no_mangle]
@@ -230,7 +362,16 @@ pub unsafe extern "C" fn sp_compress_ffi(
     };
 
     let handle = if build_core_spqr != 0 {
-        let r = compress_and_build_spqr_borrowed(n_nodes, edges_slice, contr_slice);
+        let cr = compress_borrowed(n_nodes, edges_slice, contr_slice);
+        let macro_tree = cr.tree;
+        let (core_spqr, core_node_remap, core_node_inv) =
+            build_core_spqr_parts_fast(n_nodes, &macro_tree);
+        let r = CompressAndSpqrResult::from_parts(
+            macro_tree,
+            core_spqr,
+            core_node_remap,
+            core_node_inv,
+        );
         SpCompressHandle::WithSpqr(Box::new(r))
     } else {
         let r = compress_borrowed(n_nodes, edges_slice, contr_slice);
@@ -285,18 +426,23 @@ pub unsafe extern "C" fn sp_compress_timed_ffi(
         fill_compression_timings(&mut timings, ct);
 
         let core_total_t0 = Instant::now();
-        let (core_spqr, core_node_remap, core_node_inv) =
-            build_core_spqr_timed(n_nodes, &macro_tree, &mut timings, true);
+        let (core_spqr, core_node_remap, core_node_inv) = build_core_spqr_timed(
+            n_nodes,
+            &macro_tree,
+            &mut timings,
+            true,
+            build_core_spqr > 1,
+        );
 
         timings.t_build_spqr_core_us = core_total_t0.elapsed().as_micros() as u64;
 
         let t_wrap = Instant::now();
-        let h = SpCompressHandle::WithSpqr(Box::new(CompressAndSpqrResult {
+        let h = SpCompressHandle::WithSpqr(Box::new(CompressAndSpqrResult::from_parts(
             macro_tree,
             core_spqr,
             core_node_remap,
             core_node_inv,
-        }));
+        )));
         timings.t_handle_wrap_us = t_wrap.elapsed().as_micros() as u64;
         h
     } else {
@@ -320,6 +466,77 @@ pub unsafe extern "C" fn sp_compress_timed_ffi(
     if !out_timings.is_null() {
         *out_timings = timings;
     }
+
+    Box::into_raw(Box::new(handle))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sp_compress_indexed_ffi(
+    n_nodes: u32,
+    src_ptr: *const u32,
+    dst_ptr: *const u32,
+    edges_len: u32,
+    contractible_ptr: *const u8,
+    contractible_len: u32,
+    build_core_spqr: u8,
+) -> *mut SpCompressHandle {
+    if (src_ptr.is_null() || dst_ptr.is_null()) && edges_len > 0 {
+        return ptr::null_mut();
+    }
+    if contractible_ptr.is_null() && contractible_len > 0 {
+        return ptr::null_mut();
+    }
+    if (contractible_len as u64) < (n_nodes as u64) {
+        return ptr::null_mut();
+    }
+
+    let src_slice: &[u32] = if edges_len == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(src_ptr, edges_len as usize)
+    };
+    let dst_slice: &[u32] = if edges_len == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(dst_ptr, edges_len as usize)
+    };
+    let contr_slice: &[u8] = if contractible_len == 0 {
+        &[]
+    } else {
+        slice::from_raw_parts(contractible_ptr, contractible_len as usize)
+    };
+
+    let cr = match try_compress_degree2_direct_indexed(n_nodes, src_slice, dst_slice, contr_slice) {
+        Some(r) => r,
+        None => {
+            let mut edges = Vec::with_capacity(edges_len as usize);
+            for i in 0..edges_len as usize {
+                edges.push(InputEdge {
+                    u: NodeId(src_slice[i]),
+                    v: NodeId(dst_slice[i]),
+                    original_edge_id: EdgeId(i as u32),
+                });
+            }
+            compress_borrowed(n_nodes, &edges, contr_slice)
+        }
+    };
+    let macro_tree = cr.tree;
+
+    let handle = if build_core_spqr != 0 {
+        let (core_spqr, core_node_remap, core_node_inv) =
+            build_core_spqr_parts_fast(n_nodes, &macro_tree);
+        SpCompressHandle::WithSpqr(Box::new(CompressAndSpqrResult::from_parts(
+            macro_tree,
+            core_spqr,
+            core_node_remap,
+            core_node_inv,
+        )))
+    } else {
+        SpCompressHandle::PlainTree {
+            tree: macro_tree,
+            success: cr.success,
+        }
+    };
 
     Box::into_raw(Box::new(handle))
 }
@@ -397,6 +614,83 @@ pub unsafe extern "C" fn sp_compress_get_core_spqr(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn sp_compress_get_core_scad_export(
+    handle: *const SpCompressHandle,
+) -> CoreScadFfi {
+    if handle.is_null() {
+        return CoreScadFfi::empty();
+    }
+
+    if let SpCompressHandle::WithSpqr(r) = &*handle {
+        if let Some(scad) = &r.core_scad_export {
+            return CoreScadFfi {
+                components_ptr: scad.components.as_ptr(),
+                components_len: scad.components.len() as u32,
+                edges_ptr: scad.edges.as_ptr(),
+                edges_len: scad.edges.len() as u32,
+                incidences_ptr: scad.incidences.as_ptr(),
+                incidences_len: scad.incidences.len() as u32,
+                node_mapping_ptr: scad.node_mapping.as_ptr(),
+                node_mapping_len: scad.node_mapping.len() as u32,
+            };
+        }
+    }
+
+    CoreScadFfi::empty()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sp_compress_get_spqra_minimizer_view(
+    handle: *const SpCompressHandle,
+) -> SpqraMinimizerView {
+    if handle.is_null() {
+        return SpqraMinimizerView::empty();
+    }
+
+    if let SpCompressHandle::WithSpqr(r) = &*handle {
+        if let Some(sidecar) = &r.spqra_minimizer_sidecar {
+            return SpqraMinimizerView {
+                components_ptr: sidecar.components.as_ptr(),
+                components_len: sidecar.components.len() as u32,
+                edges_ptr: sidecar.edges.as_ptr(),
+                edges_len: sidecar.edges.len() as u32,
+                node_mapping_ptr: sidecar.node_mapping.as_ptr(),
+                node_mapping_len: sidecar.node_mapping.len() as u32,
+                children_ptr: sidecar.children.as_ptr(),
+                children_len: sidecar.children.len() as u32,
+                postorder_ptr: sidecar.postorder.as_ptr(),
+                postorder_len: sidecar.postorder.len() as u32,
+                summary: sidecar.summary,
+            };
+        }
+    }
+
+    SpqraMinimizerView::empty()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sp_compress_get_spqra_behavior_atom_view(
+    handle: *const SpCompressHandle,
+) -> SpqraBehaviorAtomView {
+    if handle.is_null() {
+        return SpqraBehaviorAtomView::empty();
+    }
+
+    if let SpCompressHandle::WithSpqr(r) = &*handle {
+        if let Some(sidecar) = &r.spqra_minimizer_sidecar {
+            return SpqraBehaviorAtomView {
+                atoms_ptr: sidecar.behavior_atoms.as_ptr(),
+                atoms_len: sidecar.behavior_atoms.len() as u32,
+                items_ptr: sidecar.behavior_atom_items.as_ptr(),
+                items_len: sidecar.behavior_atom_items.len() as u32,
+            };
+        }
+    }
+
+    SpqraBehaviorAtomView::empty()
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn sp_compress_core_node_inv(
     handle: *const SpCompressHandle,
     out_len: *mut u32,
@@ -409,13 +703,25 @@ pub unsafe extern "C" fn sp_compress_core_node_inv(
     }
 
     if let SpCompressHandle::WithSpqr(r) = &*handle {
-        if !out_len.is_null() {
-            *out_len = r.core_node_inv.len() as u32;
-        }
-        if r.core_node_inv.is_empty() {
+        if r.core_spqr.is_none() {
+            if !out_len.is_null() {
+                *out_len = 0;
+            }
             return ptr::null();
         }
-        return r.core_node_inv.as_ptr();
+
+        let inv: &[NodeId] = if r.core_node_inv.is_empty() {
+            &r.macro_tree.core_nodes
+        } else {
+            &r.core_node_inv
+        };
+        if !out_len.is_null() {
+            *out_len = inv.len() as u32;
+        }
+        if inv.is_empty() {
+            return ptr::null();
+        }
+        return inv.as_ptr();
     }
 
     if !out_len.is_null() {
@@ -513,23 +819,26 @@ pub unsafe extern "C" fn sp_compress_reconstruct_with_timings_ffi(
 
     let t1 = Instant::now();
     let (core_spqr, core_node_remap, core_node_inv) =
-        build_core_spqr_timed(n_nodes, &macro_tree, &mut timings, false);
+        build_core_spqr_timed(n_nodes, &macro_tree, &mut timings, false, false);
 
     timings.t_build_spqr_core_us = t1.elapsed().as_micros() as u64;
 
-    let result = CompressAndSpqrResult {
-        macro_tree,
-        core_spqr,
-        core_node_remap,
-        core_node_inv,
-    };
+    let result =
+        CompressAndSpqrResult::from_parts(macro_tree, core_spqr, core_node_remap, core_node_inv);
 
     let (tree, rt) = match &result.core_spqr {
-        Some(spqr) if !spqr.tree.is_empty() => crate::sp_compress::reconstruct::reconstruct_timed(
-            &spqr.tree,
-            &result.macro_tree,
-            &result.core_node_inv,
-        ),
+        Some(spqr) if !spqr.tree.is_empty() => {
+            let core_node_inv = if result.core_node_inv.is_empty() {
+                &result.macro_tree.core_nodes
+            } else {
+                &result.core_node_inv
+            };
+            crate::sp_compress::reconstruct::reconstruct_timed(
+                &spqr.tree,
+                &result.macro_tree,
+                core_node_inv,
+            )
+        }
         _ => crate::sp_compress::reconstruct::reconstruct_fully_reducible_timed(&result.macro_tree),
     };
 

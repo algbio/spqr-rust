@@ -43,7 +43,12 @@ fn canonicalize_timed(tree: &mut SpqrTree, timings: &mut ReconstructTimings) {
 pub fn reconstruct_from_compress_result(result: &CompressAndSpqrResult) -> SpqrTree {
     match &result.core_spqr {
         Some(spqr) if !spqr.tree.is_empty() => {
-            reconstruct(&spqr.tree, &result.macro_tree, &result.core_node_inv)
+            let core_node_inv = if result.core_node_inv.is_empty() {
+                &result.macro_tree.core_nodes
+            } else {
+                &result.core_node_inv
+            };
+            reconstruct(&spqr.tree, &result.macro_tree, core_node_inv)
         }
         _ => reconstruct_fully_reducible(&result.macro_tree),
     }
@@ -228,6 +233,8 @@ pub(crate) fn reconstruct_fully_reducible_timed(
                 skeleton_num_nodes: Vec::new(),
                 edge_to_tree_node: vec![TreeNodeId::INVALID; n_real_edges],
                 min_real_per_node: Vec::new(),
+                preassembly_scad_export: None,
+                preassembly_minimizer_sidecar: None,
             },
             timings,
         );
@@ -252,6 +259,8 @@ pub(crate) fn reconstruct_fully_reducible_timed(
                 skeleton_num_nodes: Vec::new(),
                 edge_to_tree_node: vec![TreeNodeId::INVALID; n_real_edges],
                 min_real_per_node: Vec::new(),
+                preassembly_scad_export: None,
+                preassembly_minimizer_sidecar: None,
             },
             timings,
         );
@@ -1487,6 +1496,8 @@ impl Builder {
             skeleton_num_nodes,
             edge_to_tree_node,
             min_real_per_node,
+            preassembly_scad_export: None,
+            preassembly_minimizer_sidecar: None,
         }
     }
 }

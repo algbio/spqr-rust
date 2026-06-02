@@ -27,6 +27,43 @@ pub struct WorkEdgeForBucket<'a> {
     pub bucket_next: &'a mut u32,
 }
 
+const BUCKET_DIRTY_BIT: u32 = 0x8000_0000;
+const BUCKET_COUNT_MASK: u32 = 0x7FFF_FFFF;
+
+impl Bucket {
+    #[inline(always)]
+    pub fn live_count(self) -> u32 {
+        self.count & BUCKET_COUNT_MASK
+    }
+
+    #[inline(always)]
+    pub fn set_live_count(&mut self, count: u32) {
+        let dirty = self.count & BUCKET_DIRTY_BIT;
+        self.count = dirty | (count & BUCKET_COUNT_MASK);
+    }
+
+    #[inline(always)]
+    pub fn increment_count(&mut self) {
+        let count = self.live_count();
+        self.set_live_count(count + 1);
+    }
+
+    #[inline(always)]
+    pub fn is_dirty(self) -> bool {
+        (self.count & BUCKET_DIRTY_BIT) != 0
+    }
+
+    #[inline(always)]
+    pub fn mark_dirty(&mut self) {
+        self.count |= BUCKET_DIRTY_BIT;
+    }
+
+    #[inline(always)]
+    pub fn mark_clean(&mut self) {
+        self.count &= BUCKET_COUNT_MASK;
+    }
+}
+
 pub struct FlatPairMap {
     pub slots: Vec<Slot>,
 
@@ -156,17 +193,31 @@ impl FlatPairMap {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub enum OnSeenResult {
     SingleStored,
 
     InsertedFirst {
         bucket_next: u32,
+        schedule_dirty: bool,
     },
 
     PromotedAndInserted {
         promoted_edge: u32,
         bucket_next: u32,
+        schedule_dirty: bool,
     },
+}
+
+impl OnSeenResult {
+    #[inline(always)]
+    pub fn schedule_dirty(self) -> bool {
+        match self {
+            OnSeenResult::SingleStored => false,
+            OnSeenResult::InsertedFirst { schedule_dirty, .. } => schedule_dirty,
+            OnSeenResult::PromotedAndInserted { schedule_dirty, .. } => schedule_dirty,
+        }
+    }
 }
 
 impl FlatPairMap {
@@ -201,19 +252,26 @@ impl FlatPairMap {
                     let b = &mut self.buckets[bid as usize];
                     b.head = edge_idx;
                     b.count = 2;
+                    b.mark_dirty();
                     self.slots[i].value = Self::pack_indirect(bid);
                     return OnSeenResult::PromotedAndInserted {
                         promoted_edge: prev_edge,
                         bucket_next: prev_edge,
+                        schedule_dirty: true,
                     };
                 } else {
                     let bid = Self::bucket_index(v) as usize;
                     let b = &mut self.buckets[bid];
                     let cur_head = b.head;
                     b.head = edge_idx;
-                    b.count += 1;
+                    b.increment_count();
+                    let schedule_dirty = !b.is_dirty() && b.live_count() >= 2;
+                    if schedule_dirty {
+                        b.mark_dirty();
+                    }
                     return OnSeenResult::InsertedFirst {
                         bucket_next: cur_head,
+                        schedule_dirty,
                     };
                 }
             }
@@ -269,6 +327,11 @@ impl FlatPairMap {
             }
             i = (i + 1) & self.mask;
         }
+    }
+
+    #[inline]
+    pub fn mark_bucket_clean(&mut self, bucket_id: u32) {
+        self.buckets[bucket_id as usize].mark_clean();
     }
 
     pub fn drop_storage(&mut self) {
@@ -330,13 +393,29 @@ mod tests {
         assert_eq!(pm.buckets.len(), 1);
         let bid = pm.find_bucket(k).expect("must be indirect");
         let b = &pm.buckets[bid as usize];
-        assert_eq!(b.count, 2);
+        assert_eq!(b.live_count(), 2);
 
         let r3 = pm.on_seen(k, 2);
         assert!(matches!(r3, OnSeenResult::InsertedFirst { .. }));
         let bid = pm.find_bucket(k).unwrap();
         let b = &pm.buckets[bid as usize];
-        assert_eq!(b.count, 3);
+        assert_eq!(b.live_count(), 3);
+    }
+
+    #[test]
+    fn dirty_schedule_is_deduplicated_until_clean() {
+        let mut pm = FlatPairMap::new();
+        pm.init(16);
+        let k = make_pair_key(NodeId(0), NodeId(1));
+
+        assert!(!pm.on_seen(k, 0).schedule_dirty());
+        assert!(pm.on_seen(k, 1).schedule_dirty());
+        assert!(!pm.on_seen(k, 2).schedule_dirty());
+
+        let bid = pm.find_bucket(k).expect("must be indirect");
+        pm.mark_bucket_clean(bid);
+
+        assert!(pm.on_seen(k, 3).schedule_dirty());
     }
 
     #[test]

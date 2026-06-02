@@ -111,6 +111,17 @@ impl PNodeArena {
     }
 
     pub fn make_parallel(&mut self, u: NodeId, v: NodeId, kids: &[u32]) -> u32 {
+        let mut flat_kids = Vec::with_capacity(kids.len());
+        self.make_parallel_with_scratch(u, v, kids, &mut flat_kids)
+    }
+
+    pub fn make_parallel_with_scratch(
+        &mut self,
+        u: NodeId,
+        v: NodeId,
+        kids: &[u32],
+        flat_kids: &mut Vec<u32>,
+    ) -> u32 {
         let id = self.pool.len() as u32;
         self.pool.push(PNode {
             kind: PK_PARALLEL,
@@ -124,7 +135,8 @@ impl PNodeArena {
             edge_id: INVALID_EDGE,
         });
 
-        let mut flat_kids: Vec<u32> = Vec::with_capacity(kids.len());
+        flat_kids.clear();
+        flat_kids.reserve(kids.len());
         for &k in kids {
             if self.pool[k as usize].kind == PK_PARALLEL {
                 let mut cc = self.pool[k as usize].left_kid;
