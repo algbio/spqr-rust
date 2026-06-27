@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 #define SPQR_INVALID UINT32_MAX
+#define SPQR_INVALID_U64 UINT64_MAX
 
 #define SPQR_NODE_TYPE_S 0
 #define SPQR_NODE_TYPE_P 1
@@ -25,6 +26,9 @@ typedef struct SpqrCCResult SpqrCCResult;
 typedef struct SpqrBCTreeFFI SpqrBCTreeFFI;
 typedef struct SpqrResult SpqrResult;
 typedef struct SpqrTree SpqrTree;
+typedef struct SpqrGraphFFI64 SpqrGraphFFI64;
+typedef struct SpqrResult64 SpqrResult64;
+typedef struct SpqrTree64 SpqrTree64;
 
 typedef struct SkeletonEdge {
 	uint32_t src;
@@ -35,6 +39,15 @@ typedef struct SkeletonEdge {
 	uint32_t twin_edge_idx;
 } SkeletonEdge;
 
+typedef struct SkeletonEdge64 {
+	uint64_t src;
+	uint64_t dst;
+	uint64_t real_edge;
+	uint64_t virtual_id;
+	uint64_t twin_tree_node;
+	uint64_t twin_edge_idx;
+} SkeletonEdge64;
+
 typedef struct SkeletonEdgeInfo {
 	uint32_t src;
 	uint32_t dst;
@@ -43,6 +56,114 @@ typedef struct SkeletonEdgeInfo {
 	bool is_virtual;
 } SkeletonEdgeInfo;
 
+typedef struct SkeletonEdgeInfo64 {
+	uint64_t src;
+	uint64_t dst;
+	uint64_t real_edge;
+	uint64_t twin_tree_node;
+	bool is_virtual;
+} SkeletonEdgeInfo64;
+
+
+SpqrGraphFFI64* spqr_graph_new_u64(uint64_t node_capacity, uint64_t edge_capacity);
+void spqr_graph_free_u64(SpqrGraphFFI64* graph);
+uint64_t spqr_graph_add_nodes_u64(SpqrGraphFFI64* graph, uint64_t count);
+uint64_t spqr_graph_add_edge_u64(SpqrGraphFFI64* graph, uint64_t u, uint64_t v);
+SpqrGraphFFI64* spqr_graph_from_arrays_u64(uint64_t num_nodes,
+                                           const uint64_t* src,
+                                           const uint64_t* dst,
+                                           uint64_t num_edges);
+uint64_t spqr_graph_num_nodes_u64(const SpqrGraphFFI64* graph);
+uint64_t spqr_graph_num_edges_u64(const SpqrGraphFFI64* graph);
+uint64_t spqr_graph_edge_src_u64(const SpqrGraphFFI64* graph, uint64_t edge_id);
+uint64_t spqr_graph_edge_dst_u64(const SpqrGraphFFI64* graph, uint64_t edge_id);
+uint64_t spqr_graph_degree_u64(const SpqrGraphFFI64* graph, uint64_t node);
+uint64_t spqr_graph_adj_cursor_u64(const SpqrGraphFFI64* graph, uint64_t node);
+bool spqr_graph_adj_next_u64(const SpqrGraphFFI64* graph,
+                             uint64_t cursor,
+                             uint64_t* out_neighbor,
+                             uint64_t* out_edge,
+                             uint64_t* out_next_cursor);
+typedef bool (*NeighborCallback64)(uint64_t neighbor_node, uint64_t edge_id, void* user_data);
+void spqr_graph_for_each_neighbor_u64(const SpqrGraphFFI64* graph,
+                                      uint64_t node,
+                                      NeighborCallback64 callback,
+                                      void* user_data);
+uint64_t spqr_graph_neighbors_to_buffer_u64(const SpqrGraphFFI64* graph,
+                                            uint64_t node,
+                                            uint64_t* nodes_out,
+                                            uint64_t* edges_out,
+                                            uint64_t buffer_size);
+
+SpqrResult64* spqr_build_u64(const SpqrGraphFFI64* graph);
+void spqr_result_free_u64(SpqrResult64* result);
+const SpqrTree64* spqr_result_tree_u64(const SpqrResult64* result);
+const uint64_t* spqr_result_self_loops_u64(const SpqrResult64* result, uint64_t* out_len);
+
+uint64_t spqr_tree_len_u64(const SpqrTree64* tree);
+uint64_t spqr_tree_root_u64(const SpqrTree64* tree);
+uint8_t spqr_tree_node_type_u64(const SpqrTree64* tree, uint64_t node_id);
+uint64_t spqr_tree_node_parent_u64(const SpqrTree64* tree, uint64_t node_id);
+uint64_t spqr_tree_node_children_copy_u64(const SpqrTree64* tree,
+                                          uint64_t node_id,
+                                          uint64_t* out_children,
+                                          uint64_t out_capacity);
+uint64_t spqr_tree_skeleton_num_edges_u64(const SpqrTree64* tree, uint64_t node_id);
+uint64_t spqr_tree_skeleton_num_nodes_u64(const SpqrTree64* tree, uint64_t node_id);
+void spqr_tree_skeleton_poles_u64(const SpqrTree64* tree,
+                                  uint64_t node_id,
+                                  uint64_t* pole1,
+                                  uint64_t* pole2);
+void spqr_tree_skeleton_edge_u64(const SpqrTree64* tree,
+                                 uint64_t node_id,
+                                 uint64_t edge_idx,
+                                 SkeletonEdgeInfo64* out);
+uint64_t spqr_tree_skeleton_original_node_u64(const SpqrTree64* tree,
+                                              uint64_t tree_node_id,
+                                              uint64_t local_node);
+uint64_t spqr_tree_node_of_edge_u64(const SpqrTree64* tree, uint64_t edge_id);
+uint64_t spqr_tree_edge_mapping_copy_u64(const SpqrTree64* tree,
+                                         uint64_t* out_tree_nodes,
+                                         uint64_t out_capacity);
+const uint64_t* spqr_tree_edge_mapping_raw_u64(const SpqrTree64* tree, uint64_t* out_len);
+void spqr_tree_edge_mapping_bulk_u64(const SpqrTree64* tree,
+                                     uint64_t num_edges,
+                                     uint64_t* out_tree_nodes);
+void spqr_tree_normalize_u64(SpqrTree64* tree);
+void spqr_tree_compact_u64(SpqrTree64* tree);
+void spqr_tree_count_by_type_u64(const SpqrTree64* tree,
+                                 uint64_t* s_count,
+                                 uint64_t* p_count,
+                                 uint64_t* r_count);
+void spqr_tree_get_sizes_u64(const SpqrTree64* tree,
+                             uint64_t* out_num_nodes,
+                             uint64_t* out_total_children,
+                             uint64_t* out_total_skeleton_edges);
+void spqr_tree_bulk_export_u64(const SpqrTree64* tree,
+                               uint8_t* node_types,
+                               uint64_t* node_parents,
+                               uint64_t* children_offsets,
+                               uint64_t* children,
+                               uint64_t* skeleton_offsets,
+                               uint64_t* skeleton_src,
+                               uint64_t* skeleton_dst,
+                               uint64_t* skeleton_real_edge,
+                               uint8_t* skeleton_is_virtual);
+void spqr_tree_bulk_export_node_mapping_u64(const SpqrTree64* tree,
+                                            uint64_t* node_mapping_offsets,
+                                            uint64_t* node_mapping);
+void spqr_tree_info_u64(const SpqrTree64* tree, uint64_t* out_num_nodes, uint64_t* out_root);
+const uint8_t* spqr_tree_node_types_raw_u64(const SpqrTree64* tree);
+const uint64_t* spqr_tree_node_parents_raw_u64(const SpqrTree64* tree);
+const uint64_t* spqr_tree_children_offsets_raw_u64(const SpqrTree64* tree);
+const uint64_t* spqr_tree_children_raw_u64(const SpqrTree64* tree, uint64_t* out_len);
+const uint64_t* spqr_tree_skeleton_offsets_raw_u64(const SpqrTree64* tree);
+const SkeletonEdge64* spqr_tree_skeleton_edges_raw_u64(const SpqrTree64* tree, uint64_t* out_len);
+void spqr_tree_node_mapping_raw_u64(const SpqrTree64* tree,
+                                    const uint64_t** out_offsets,
+                                    const uint64_t** out_mapping,
+                                    uint64_t* out_mapping_len);
+const uint64_t* spqr_tree_skeleton_num_nodes_raw_u64(const SpqrTree64* tree);
 
 SpqrGraphFFI* spqr_graph_new(uint32_t node_capacity, uint32_t edge_capacity);
 void spqr_graph_free(SpqrGraphFFI* graph);
