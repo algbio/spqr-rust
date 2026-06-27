@@ -1367,7 +1367,7 @@ fn build_spqr_tree_filtered_impl(
     let _merged_component_types = Some(merge_same_type_components(&mut all, m));
     if let Some(t) = timings.as_mut() {
         t.c_merged_components = all.len() as u64;
-        t.c_virtual_id_span = next_virtual.saturating_sub(m as u64) as u64;
+        t.c_virtual_id_span = next_virtual.saturating_sub(m as u64);
         let mut real_edges = 0u64;
         let mut virtual_incidences = 0u64;
         for comp in &all {
@@ -3566,7 +3566,7 @@ impl SpqrTree {
                         let key = if edge.real_edge.is_valid() {
                             Key {
                                 is_virtual: 0,
-                                a: edge.real_edge.0 as u64,
+                                a: edge.real_edge.0,
                                 b: 0,
                             }
                         } else {
@@ -3638,9 +3638,9 @@ impl SpqrTree {
                 SpqrNodeType::R => 2,
             };
             h = mix64(h, ty_byte as u64);
-            h = mix64(h, n_virt as u64);
+            h = mix64(h, n_virt);
             for r in &real_eids {
-                h = mix64(h, *r as u64);
+                h = mix64(h, *r);
             }
             hashes[tn] = h;
         }
