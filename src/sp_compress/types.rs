@@ -1,16 +1,16 @@
 use crate::{EdgeId, NodeId};
 
-pub type ChildRef = u32;
-pub type SpNodeId = u32;
+pub type ChildRef = u64;
+pub type SpNodeId = u64;
 
-pub const TAG_BIT: u32 = 0x8000_0000;
-pub const PAYLOAD_MASK: u32 = 0x7FFF_FFFF;
+pub const TAG_BIT: ChildRef = 0x8000_0000_0000_0000;
+pub const PAYLOAD_MASK: ChildRef = 0x7FFF_FFFF_FFFF_FFFF;
 
-pub const INVALID_SP_NODE: SpNodeId = u32::MAX;
+pub const INVALID_SP_NODE: SpNodeId = u64::MAX;
 
 #[inline(always)]
 pub const fn make_child_edge(eid: EdgeId) -> ChildRef {
-    eid.0
+    eid.0 as ChildRef
 }
 
 #[inline(always)]
@@ -30,7 +30,7 @@ pub const fn child_is_edge(c: ChildRef) -> bool {
 
 #[inline(always)]
 pub const fn child_as_edge(c: ChildRef) -> EdgeId {
-    EdgeId(c)
+    EdgeId(c as u32)
 }
 
 #[inline(always)]
@@ -48,8 +48,8 @@ pub struct SpNode {
     pub _pad: [u8; 3],
     pub left: u32,
     pub right: u32,
-    pub children_offset: u32,
-    pub children_count: u32,
+    pub children_offset: u64,
+    pub children_count: u64,
 }
 
 #[repr(C)]
@@ -174,18 +174,18 @@ mod size_assertions {
     use super::*;
 
     #[test]
-    fn macronode_is_20_bytes() {
-        assert_eq!(std::mem::size_of::<SpNode>(), 20);
+    fn macronode_is_32_bytes() {
+        assert_eq!(std::mem::size_of::<SpNode>(), 32);
     }
 
     #[test]
-    fn coreedge_is_12_bytes() {
-        assert_eq!(std::mem::size_of::<CoreEdge>(), 12);
+    fn coreedge_is_16_bytes() {
+        assert_eq!(std::mem::size_of::<CoreEdge>(), 16);
     }
 
     #[test]
-    fn childref_is_4_bytes() {
-        assert_eq!(std::mem::size_of::<ChildRef>(), 4);
+    fn childref_is_8_bytes() {
+        assert_eq!(std::mem::size_of::<ChildRef>(), 8);
     }
 
     #[test]

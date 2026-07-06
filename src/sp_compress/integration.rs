@@ -240,7 +240,7 @@ impl Default for FfiSpqraMinimizerEdge {
         Self {
             twin_component: INVALID,
             twin_local_edge: INVALID,
-            child_ref: INVALID,
+            child_ref: INVALID.into(),
             flags: 0,
             src_local: INVALID,
             dst_local: INVALID,

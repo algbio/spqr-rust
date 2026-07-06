@@ -461,7 +461,45 @@ public:
 };
 
 class StaticSPQRTree {
+public:
+    struct FlatData {
+        uint32_t numNodes = 0;
+        uint32_t root = UINT32_MAX;
+        std::vector<uint8_t> nodeTypes;
+        std::vector<uint32_t> nodeParents;
+        std::vector<uint32_t> childrenOffsets;
+        std::vector<uint32_t> children;
+        std::vector<uint32_t> skeletonOffsets;
+        std::vector<SkeletonEdge> skeletonEdges;
+        std::vector<uint32_t> skeletonNumNodes;
+        std::vector<uint32_t> nodeMappingOffsets;
+        std::vector<uint32_t> nodeMapping;
+        std::vector<uint32_t> edgeToTreeNode;
+
+        spqr_rust::SpqrTreeFlatView view() const {
+            return spqr_rust::SpqrTreeFlatView(
+                numNodes,
+                root,
+                nodeTypes.empty() ? nullptr : nodeTypes.data(),
+                nodeParents.empty() ? nullptr : nodeParents.data(),
+                childrenOffsets.empty() ? nullptr : childrenOffsets.data(),
+                children.empty() ? nullptr : children.data(),
+                static_cast<uint32_t>(children.size()),
+                skeletonOffsets.empty() ? nullptr : skeletonOffsets.data(),
+                skeletonEdges.empty() ? nullptr : skeletonEdges.data(),
+                static_cast<uint32_t>(skeletonEdges.size()),
+                skeletonNumNodes.empty() ? nullptr : skeletonNumNodes.data(),
+                nodeMappingOffsets.empty() ? nullptr : nodeMappingOffsets.data(),
+                nodeMapping.empty() ? nullptr : nodeMapping.data(),
+                static_cast<uint32_t>(nodeMapping.size()),
+                edgeToTreeNode.empty() ? nullptr : edgeToTreeNode.data(),
+                static_cast<uint32_t>(edgeToTreeNode.size()));
+        }
+    };
+
+private:
     std::unique_ptr<spqr_rust::RustSPQRResult> result_;
+    std::unique_ptr<FlatData> ownedFlat_;
     spqr_rust::SpqrTreeFlatView view_;
     std::vector<uint32_t> parents_;
     TreeGraph tree_;
@@ -534,6 +572,13 @@ public:
         buildTree();
     }
 
+    StaticSPQRTree(FlatData data, const Graph* gccGraph)
+        : ownedFlat_(std::make_unique<FlatData>(std::move(data))),
+          view_(ownedFlat_->view()),
+          gccGraph_(gccGraph) {
+        buildTree();
+    }
+
 private:
     static std::unique_ptr<spqr_rust::RustSPQRResult> buildViaSpCompress_(
         const Graph& g, const uint8_t* contractible, uint32_t contractible_len)
@@ -551,6 +596,7 @@ private:
             n_nodes,
             in_edges.empty() ? nullptr : in_edges.data(),
             n_edges,
+            n_edges == 0 ? 0u : n_edges - 1u,
             contractible,
             contractible_len);
     }
@@ -1277,6 +1323,7 @@ private:
             n_nodes,
             in_edges.empty() ? nullptr : in_edges.data(),
             n_edges,
+            n_edges == 0 ? 0u : n_edges - 1u,
             contractible,
             contractible_len);
     }

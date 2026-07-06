@@ -78,42 +78,42 @@ pub struct FlatPairMap {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Slot {
     pub key: u64,
-    pub value: u32,
+    pub value: u64,
 }
 
 impl FlatPairMap {
-    pub const EMPTY: u32 = u32::MAX;
-    pub const TOMBSTONE: u32 = u32::MAX - 1;
-    pub const INDIRECT_FLAG: u32 = 0x8000_0000;
-    pub const PAYLOAD_MASK: u32 = 0x7FFF_FFFF;
+    pub const EMPTY: u64 = u64::MAX;
+    pub const TOMBSTONE: u64 = u64::MAX - 1;
+    pub const INDIRECT_FLAG: u64 = 0x8000_0000_0000_0000;
+    pub const PAYLOAD_MASK: u64 = 0x7FFF_FFFF_FFFF_FFFF;
 
     #[inline(always)]
-    pub fn is_empty(v: u32) -> bool {
+    pub fn is_empty(v: u64) -> bool {
         v == Self::EMPTY
     }
     #[inline(always)]
-    pub fn is_tombstone(v: u32) -> bool {
+    pub fn is_tombstone(v: u64) -> bool {
         v == Self::TOMBSTONE
     }
     #[inline(always)]
-    pub fn is_indirect(v: u32) -> bool {
+    pub fn is_indirect(v: u64) -> bool {
         v != Self::EMPTY && (v & Self::INDIRECT_FLAG) != 0
     }
     #[inline(always)]
-    pub fn is_single(v: u32) -> bool {
+    pub fn is_single(v: u64) -> bool {
         v != Self::EMPTY && v != Self::TOMBSTONE && (v & Self::INDIRECT_FLAG) == 0
     }
     #[inline(always)]
-    pub fn single_edge(v: u32) -> u32 {
-        v
+    pub fn single_edge(v: u64) -> u32 {
+        v as u32
     }
     #[inline(always)]
-    pub fn bucket_index(v: u32) -> u32 {
-        v & Self::PAYLOAD_MASK
+    pub fn bucket_index(v: u64) -> u32 {
+        (v & Self::PAYLOAD_MASK) as u32
     }
     #[inline(always)]
-    pub fn pack_indirect(bid: u32) -> u32 {
-        bid | Self::INDIRECT_FLAG
+    pub fn pack_indirect(bid: u32) -> u64 {
+        (bid as u64) | Self::INDIRECT_FLAG
     }
 
     pub fn new() -> Self {
@@ -178,7 +178,7 @@ impl FlatPairMap {
         }
     }
 
-    fn insert_internal(&mut self, key: u64, value: u32) {
+    fn insert_internal(&mut self, key: u64, value: u64) {
         let mut i = (Self::hash_key(key) as usize) & self.mask;
         loop {
             let v = self.slots[i].value;
@@ -285,7 +285,7 @@ impl FlatPairMap {
         };
         let slot = &mut self.slots[insert_at];
         slot.key = key;
-        slot.value = edge_idx;
+        slot.value = edge_idx as u64;
         if first_tomb == usize::MAX {
             self.live += 1;
         }

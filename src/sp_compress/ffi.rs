@@ -12,7 +12,7 @@ use crate::sp_compress::reduction::{
     compress_borrowed, compress_borrowed_timed, CompressionTimings,
 };
 use crate::sp_compress::types::{ChildRef, CompressionStats, CoreEdge, InputEdge, SpNode, SpTree};
-use crate::{EdgeId, NodeId};
+use crate::{EdgeId, NodeId, SkeletonEdge, SpqrNodeType, SpqrResult, SpqrTree, TreeNodeId};
 use std::ptr;
 use std::slice;
 use std::sync::Arc;
@@ -276,18 +276,63 @@ fn fill_compression_timings(timings: &mut SpCompressTimings, ct: CompressionTimi
 #[repr(C)]
 pub struct MacroTreeFfi {
     pub macros_ptr: *const SpNode,
-    pub macros_len: u32,
+    pub macros_len: u64,
     pub children_ptr: *const ChildRef,
-    pub children_len: u32,
+    pub children_len: u64,
     pub core_edges_ptr: *const CoreEdge,
-    pub core_edges_len: u32,
+    pub core_edges_len: u64,
 
     pub core_nodes_ptr: *const u32,
-    pub core_nodes_len: u32,
+    pub core_nodes_len: u64,
 
     pub input_endpoints_ptr: *const u32,
-    pub input_endpoints_len: u32,
+    pub input_endpoints_len: u64,
     pub stats: CompressionStats,
+}
+
+#[repr(C)]
+pub struct CoreSpqrSnapshotFfi {
+    pub root: u32,
+    pub node_count: u32,
+
+    pub node_types_ptr: *const u8,
+    pub node_parents_ptr: *const u32,
+
+    pub children_offsets_ptr: *const u32,
+    pub children_offsets_len: u32,
+    pub children_ptr: *const u32,
+    pub children_len: u32,
+
+    pub skeleton_offsets_ptr: *const u32,
+    pub skeleton_offsets_len: u32,
+    pub skeleton_edges_ptr: *const SkeletonEdge,
+    pub skeleton_edges_len: u32,
+
+    pub node_mapping_offsets_ptr: *const u32,
+    pub node_mapping_offsets_len: u32,
+    pub node_mapping_ptr: *const u32,
+    pub node_mapping_len: u32,
+
+    pub skeleton_num_nodes_ptr: *const u32,
+    pub skeleton_num_nodes_len: u32,
+}
+
+#[repr(C)]
+pub struct SpCompressSnapshotFfi {
+    pub macros_ptr: *const SpNode,
+    pub macros_len: u64,
+    pub children_ptr: *const ChildRef,
+    pub children_len: u64,
+    pub core_edges_ptr: *const CoreEdge,
+    pub core_edges_len: u64,
+    pub core_nodes_ptr: *const u32,
+    pub core_nodes_len: u64,
+    pub input_endpoints_ptr: *const u32,
+    pub input_endpoints_len: u64,
+    pub stats: CompressionStats,
+    pub core_spqr: *const CoreSpqrSnapshotFfi,
+    pub core_node_inv_ptr: *const u32,
+    pub core_node_inv_len: u32,
 }
 
 #[repr(C)]
@@ -1274,11 +1319,183 @@ fn build_core_spqr_timed(
     (Some(spqr), Vec::new(), Vec::new())
 }
 
+fn copy_slice<T: Copy>(ptr: *const T, len: usize) -> Option<Vec<T>> {
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    if ptr.is_null() {
+        return None;
+    }
+    Some(unsafe { slice::from_raw_parts(ptr, len) }.to_vec())
+}
+
+fn spqr_tree_from_snapshot(core: &CoreSpqrSnapshotFfi, num_core_edges: usize) -> Option<SpqrTree> {
+    let n = core.node_count as usize;
+    if n == 0 {
+        return None;
+    }
+    if core.root as usize >= n {
+        return None;
+    }
+    if core.children_offsets_len as usize != n + 1
+        || core.skeleton_offsets_len as usize != n + 1
+        || core.node_mapping_offsets_len as usize != n + 1
+        || core.skeleton_num_nodes_len as usize != n
+    {
+        return None;
+    }
+
+    let type_bytes = copy_slice(core.node_types_ptr, n)?;
+    let mut node_types = Vec::with_capacity(n);
+    for value in type_bytes {
+        node_types.push(match value {
+            crate::ffi::SPQR_NODE_TYPE_S => SpqrNodeType::S,
+            crate::ffi::SPQR_NODE_TYPE_P => SpqrNodeType::P,
+            crate::ffi::SPQR_NODE_TYPE_R => SpqrNodeType::R,
+            _ => return None,
+        });
+    }
+
+    let node_parents_raw = copy_slice(core.node_parents_ptr, n)?;
+    let node_parents: Vec<TreeNodeId> = node_parents_raw.into_iter().map(TreeNodeId).collect();
+    let children_offsets = copy_slice(core.children_offsets_ptr, n + 1)?;
+    let children_raw = copy_slice(core.children_ptr, core.children_len as usize)?;
+    let children: Vec<TreeNodeId> = children_raw.into_iter().map(TreeNodeId).collect();
+    let skeleton_offsets = copy_slice(core.skeleton_offsets_ptr, n + 1)?;
+    let skeleton_edges = copy_slice(core.skeleton_edges_ptr, core.skeleton_edges_len as usize)?;
+    let node_mapping_offsets = copy_slice(core.node_mapping_offsets_ptr, n + 1)?;
+    let node_mapping_raw = copy_slice(core.node_mapping_ptr, core.node_mapping_len as usize)?;
+    let node_mapping: Vec<NodeId> = node_mapping_raw.into_iter().map(NodeId).collect();
+    let skeleton_num_nodes = copy_slice(core.skeleton_num_nodes_ptr, n)?;
+
+    if children_offsets.last().copied().unwrap_or(0) as usize != children.len()
+        || skeleton_offsets.last().copied().unwrap_or(0) as usize != skeleton_edges.len()
+        || node_mapping_offsets.last().copied().unwrap_or(0) as usize != node_mapping.len()
+    {
+        return None;
+    }
+
+    let mut edge_to_tree_node = vec![TreeNodeId::INVALID; num_core_edges];
+    let mut min_real_per_node = vec![u32::MAX; n];
+    for tn in 0..n {
+        let start = skeleton_offsets[tn] as usize;
+        let end = skeleton_offsets[tn + 1] as usize;
+        if start > end || end > skeleton_edges.len() {
+            return None;
+        }
+        for edge in &skeleton_edges[start..end] {
+            if edge.real_edge.is_valid() {
+                let eidx = edge.real_edge.idx();
+                if eidx < edge_to_tree_node.len() {
+                    edge_to_tree_node[eidx] = TreeNodeId(tn as u32);
+                }
+                if edge.real_edge.0 < min_real_per_node[tn] {
+                    min_real_per_node[tn] = edge.real_edge.0;
+                }
+            }
+        }
+    }
+
+    Some(SpqrTree {
+        root: TreeNodeId(core.root),
+        node_types,
+        node_parents,
+        children_offsets,
+        children,
+        skeleton_offsets,
+        skeleton_edges,
+        node_mapping_offsets,
+        node_mapping,
+        skeleton_num_nodes,
+        edge_to_tree_node,
+        min_real_per_node,
+        preassembly_scad_export: None,
+        preassembly_minimizer_sidecar: None,
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sp_compress_from_snapshot_ffi(
+    snapshot: *const SpCompressSnapshotFfi,
+) -> *mut SpCompressHandle {
+    if snapshot.is_null() {
+        return ptr::null_mut();
+    }
+    let snap = unsafe { &*snapshot };
+
+    let macros = match copy_slice(snap.macros_ptr, snap.macros_len as usize) {
+        Some(v) => v,
+        None => return ptr::null_mut(),
+    };
+    let children = match copy_slice(snap.children_ptr, snap.children_len as usize) {
+        Some(v) => v,
+        None => return ptr::null_mut(),
+    };
+    let core_edges = match copy_slice(snap.core_edges_ptr, snap.core_edges_len as usize) {
+        Some(v) => v,
+        None => return ptr::null_mut(),
+    };
+    let core_nodes_raw = match copy_slice(snap.core_nodes_ptr, snap.core_nodes_len as usize) {
+        Some(v) => v,
+        None => return ptr::null_mut(),
+    };
+    let input_endpoint_raw =
+        match copy_slice(snap.input_endpoints_ptr, snap.input_endpoints_len as usize) {
+            Some(v) => v,
+            None => return ptr::null_mut(),
+        };
+    if input_endpoint_raw.len() % 2 != 0 {
+        return ptr::null_mut();
+    }
+    let input_endpoints: Vec<[u32; 2]> = input_endpoint_raw
+        .chunks_exact(2)
+        .map(|p| [p[0], p[1]])
+        .collect();
+
+    let mut tree = SpTree {
+        macros,
+        children,
+        core_edges,
+        core_nodes: core_nodes_raw.into_iter().map(NodeId).collect(),
+        input_endpoints,
+        stats: snap.stats,
+    };
+    tree.update_stats();
+    tree.stats.input_edges = tree.input_endpoints.len() as u32;
+    tree.stats.input_nodes = snap.stats.input_nodes;
+    tree.stats.series_reductions = snap.stats.series_reductions;
+    tree.stats.parallel_reductions = snap.stats.parallel_reductions;
+    tree.stats.iterations = snap.stats.iterations;
+    tree.stats.fully_sp_reducible = snap.stats.fully_sp_reducible;
+
+    let core_spqr = if snap.core_spqr.is_null() {
+        None
+    } else {
+        match spqr_tree_from_snapshot(unsafe { &*snap.core_spqr }, tree.core_edges.len()) {
+            Some(tree) => Some(SpqrResult {
+                tree,
+                self_loops: Vec::new(),
+            }),
+            None => return ptr::null_mut(),
+        }
+    };
+
+    let core_node_inv_raw =
+        match copy_slice(snap.core_node_inv_ptr, snap.core_node_inv_len as usize) {
+            Some(v) => v,
+            None => return ptr::null_mut(),
+        };
+    let core_node_inv: Vec<NodeId> = core_node_inv_raw.into_iter().map(NodeId).collect();
+    let result = CompressAndSpqrResult::from_parts(tree, core_spqr, Vec::new(), core_node_inv);
+    Box::into_raw(Box::new(SpCompressHandle::WithSpqr(Box::new(result))))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn sp_compress_ffi(
     n_nodes: u32,
     edges_ptr: *const InputEdge,
     edges_len: u32,
+    _max_original_edge_id: u32,
     contractible_ptr: *const u8,
     contractible_len: u32,
     build_core_spqr: u8,
@@ -1351,6 +1568,11 @@ pub unsafe extern "C" fn sp_compress_ffi64(
                 n32,
                 downcast_edges.as_ptr(),
                 downcast_edges.len() as u32,
+                downcast_edges
+                    .iter()
+                    .map(|edge| edge.original_edge_id.0)
+                    .max()
+                    .unwrap_or(0),
                 contractible_ptr,
                 contractible_len32,
                 build_core_spqr,
@@ -1383,6 +1605,7 @@ pub unsafe extern "C" fn sp_compress_timed_ffi(
     n_nodes: u32,
     edges_ptr: *const InputEdge,
     edges_len: u32,
+    _max_original_edge_id: u32,
     contractible_ptr: *const u8,
     contractible_len: u32,
     build_core_spqr: u8,
@@ -1489,6 +1712,11 @@ pub unsafe extern "C" fn sp_compress_timed_ffi64(
                 n32,
                 downcast_edges.as_ptr(),
                 downcast_edges.len() as u32,
+                downcast_edges
+                    .iter()
+                    .map(|edge| edge.original_edge_id.0)
+                    .max()
+                    .unwrap_or(0),
                 contractible_ptr,
                 contractible_len32,
                 build_core_spqr,
@@ -1700,15 +1928,15 @@ pub unsafe extern "C" fn sp_compress_get_tree(handle: *const SpCompressHandle) -
 
     MacroTreeFfi {
         macros_ptr: t.macros.as_ptr(),
-        macros_len: t.macros.len() as u32,
+        macros_len: t.macros.len() as u64,
         children_ptr: t.children.as_ptr(),
-        children_len: t.children.len() as u32,
+        children_len: t.children.len() as u64,
         core_edges_ptr: t.core_edges.as_ptr(),
-        core_edges_len: t.core_edges.len() as u32,
+        core_edges_len: t.core_edges.len() as u64,
         core_nodes_ptr: t.core_nodes.as_ptr() as *const u32,
-        core_nodes_len: t.core_nodes.len() as u32,
+        core_nodes_len: t.core_nodes.len() as u64,
         input_endpoints_ptr: t.input_endpoints.as_ptr() as *const u32,
-        input_endpoints_len: (t.input_endpoints.len() * 2) as u32,
+        input_endpoints_len: (t.input_endpoints.len() * 2) as u64,
         stats: t.stats,
     }
 }
@@ -2005,6 +2233,7 @@ pub unsafe extern "C" fn sp_compress_reconstruct_ffi(
     n_nodes: u32,
     edges_ptr: *const InputEdge,
     edges_len: u32,
+    _max_original_edge_id: u32,
     contractible_ptr: *const u8,
     contractible_len: u32,
 ) -> *mut crate::SpqrResult {
@@ -2049,6 +2278,7 @@ pub unsafe extern "C" fn sp_compress_reconstruct_with_timings_ffi(
     n_nodes: u32,
     edges_ptr: *const InputEdge,
     edges_len: u32,
+    _max_original_edge_id: u32,
     contractible_ptr: *const u8,
     contractible_len: u32,
     out_stats: *mut CompressionStats,
@@ -2283,6 +2513,7 @@ mod tests {
                 4,
                 edges.as_ptr(),
                 edges.len() as u32,
+                edges.len() as u32 - 1,
                 contr.as_ptr(),
                 contr.len() as u32,
                 0,
@@ -2537,6 +2768,7 @@ mod tests {
                 4,
                 edges.as_ptr(),
                 edges.len() as u32,
+                edges.len() as u32 - 1,
                 contr.as_ptr(),
                 contr.len() as u32,
                 1,

@@ -1,7 +1,7 @@
 use crate::sp_compress::integration::CompressAndSpqrResult;
 use crate::sp_compress::types::{
-    child_as_edge, child_as_macro, child_is_macro, ChildRef, SpNode, SpTree, SP_KIND_PARALLEL,
-    SP_KIND_SERIES,
+    child_as_edge, child_as_macro, child_is_macro, ChildRef, SpNode, SpNodeId, SpTree,
+    SP_KIND_PARALLEL, SP_KIND_SERIES,
 };
 use crate::{EdgeId, NodeId, SkeletonEdge, SpqrNodeType, SpqrTree, TreeNodeId, INVALID};
 use std::time::Instant;
@@ -296,7 +296,7 @@ pub(crate) fn reconstruct_fully_reducible_timed(
 fn expand_macro_subtree(
     b: &mut Builder,
     macro_tree: &SpTree,
-    macro_id: u32,
+    macro_id: SpNodeId,
     pole_a: NodeId,
     pole_b: NodeId,
 ) -> (TreeNodeId, u32) {
@@ -317,7 +317,7 @@ fn expand_macro_subtree(
 fn expand_macro_root(
     b: &mut Builder,
     macro_tree: &SpTree,
-    macro_id: u32,
+    macro_id: SpNodeId,
     pole_a: NodeId,
     pole_b: NodeId,
 ) -> TreeNodeId {
@@ -537,7 +537,7 @@ struct ChainSegment {
     src: NodeId,
     dst: NodeId,
     real_edge: EdgeId,
-    macro_id: Option<u32>,
+    macro_id: Option<SpNodeId>,
 }
 
 fn branch_to_segments(
@@ -647,7 +647,7 @@ fn attach_parallel_child(
     macro_tree: &SpTree,
     parent_node: TreeNodeId,
     parent_edge_idx: u32,
-    macro_id: u32,
+    macro_id: SpNodeId,
     pole_a: NodeId,
     pole_b: NodeId,
 ) {

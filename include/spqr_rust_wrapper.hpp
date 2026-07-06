@@ -189,10 +189,11 @@ public:
     RustSPQRResult(uint32_t n_nodes,
                    const SpCompressInputEdge* edges,
                    uint32_t edges_len,
+                   uint32_t max_original_edge_id,
                    const uint8_t* contractible,
                    uint32_t contractible_len)
         : result_(sp_compress_reconstruct_ffi(
-              n_nodes, edges, edges_len, contractible, contractible_len)) {
+              n_nodes, edges, edges_len, max_original_edge_id, contractible, contractible_len)) {
         if (!result_) {
             throw std::runtime_error("sp_compress_reconstruct_ffi failed");
         }
@@ -354,6 +355,25 @@ private:
 
 class SpqrTreeFlatView {
 public:
+    SpqrTreeFlatView()
+        : numNodes(0),
+          root(INVALID_TREE_NODE),
+          nodeTypes(nullptr),
+          nodeParents(nullptr),
+          childrenOffsets(nullptr),
+          children(nullptr),
+          numChildren(0),
+          skeletonOffsets(nullptr),
+          skeletonEdges(nullptr),
+          numSkeletonEdges(0),
+          skeletonNumNodes(nullptr),
+          nodeMappingOffsets(nullptr),
+          nodeMapping(nullptr),
+          numNodeMapping(0),
+          edgeToTreeNode(nullptr),
+          numEdges(0),
+          tree_(nullptr) {}
+
     explicit SpqrTreeFlatView(const RustSPQRResult& result)
         : tree_(result.tree()) {
         if (!tree_) throw std::runtime_error("No SPQR tree in result");
@@ -368,9 +388,43 @@ public:
         skeletonEdges = spqr_tree_skeleton_edges_raw(tree_, &numSkeletonEdges);
         spqr_tree_node_mapping_raw(tree_, &nodeMappingOffsets, &nodeMapping, &numNodeMapping);
         skeletonNumNodes = spqr_tree_skeleton_num_nodes_raw(tree_);
-        
+
         edgeToTreeNode = spqr_tree_edge_mapping_raw(tree_, &numEdges);
     }
+
+    SpqrTreeFlatView(uint32_t num_nodes,
+                     uint32_t root_node,
+                     const uint8_t* node_types,
+                     const uint32_t* node_parents,
+                     const uint32_t* children_offsets,
+                     const uint32_t* children_ptr,
+                     uint32_t children_len,
+                     const uint32_t* skeleton_offsets,
+                     const SkeletonEdge* skeleton_edges,
+                     uint32_t skeleton_edges_len,
+                     const uint32_t* skeleton_num_nodes,
+                     const uint32_t* node_mapping_offsets,
+                     const uint32_t* node_mapping,
+                     uint32_t node_mapping_len,
+                     const uint32_t* edge_to_tree_node,
+                     uint32_t edge_to_tree_node_len)
+        : numNodes(num_nodes),
+          root(root_node),
+          nodeTypes(node_types),
+          nodeParents(node_parents),
+          childrenOffsets(children_offsets),
+          children(children_ptr),
+          numChildren(children_len),
+          skeletonOffsets(skeleton_offsets),
+          skeletonEdges(skeleton_edges),
+          numSkeletonEdges(skeleton_edges_len),
+          skeletonNumNodes(skeleton_num_nodes),
+          nodeMappingOffsets(node_mapping_offsets),
+          nodeMapping(node_mapping),
+          numNodeMapping(node_mapping_len),
+          edgeToTreeNode(edge_to_tree_node),
+          numEdges(edge_to_tree_node_len),
+          tree_(nullptr) {}
     
     ~SpqrTreeFlatView() = default;
     

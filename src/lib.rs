@@ -97,7 +97,7 @@ pub const INVALID: u32 = u32::MAX;
 
 thread_local! {
     static SKIP_ASSEMBLE_SPQRTREE: Cell<bool> = const { Cell::new(false) };
-    static SPQRA_CORE_CHILD_REFS: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
+    static SPQRA_CORE_CHILD_REFS: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
 }
 
 pub(crate) fn with_skip_assemble_spqr<T, F: FnOnce() -> T>(skip: bool, f: F) -> T {
@@ -109,7 +109,7 @@ pub(crate) fn with_skip_assemble_spqr<T, F: FnOnce() -> T>(skip: bool, f: F) -> 
     })
 }
 
-pub(crate) fn with_spqra_core_child_refs<T, F: FnOnce() -> T>(refs: Option<Vec<u32>>, f: F) -> T {
+pub(crate) fn with_spqra_core_child_refs<T, F: FnOnce() -> T>(refs: Option<Vec<u64>>, f: F) -> T {
     SPQRA_CORE_CHILD_REFS.with(|cell| {
         let old = cell.replace(refs);
         let out = f();
@@ -118,7 +118,7 @@ pub(crate) fn with_spqra_core_child_refs<T, F: FnOnce() -> T>(refs: Option<Vec<u
     })
 }
 
-fn spqra_core_child_ref(edge_id: usize) -> Option<u32> {
+fn spqra_core_child_ref(edge_id: usize) -> Option<u64> {
     SPQRA_CORE_CHILD_REFS.with(|cell| {
         cell.borrow()
             .as_ref()
@@ -1711,7 +1711,7 @@ fn build_spqra_minimizer_sidecar_from_split_components(
                 let atom_ref = atom_by_virtual.get(vidx).copied().unwrap_or(INVALID);
                 if atom_ref != INVALID {
                     behavior_atom_items.push(FfiSpqraBehaviorAtomItem {
-                        child_ref: atom_ref,
+                        child_ref: atom_ref.into(),
                         flags: SPQRA_MIN_ATOM_ITEM_BEHAVIOR_ATOM,
                         src_core: e.src,
                         dst_core: e.dst,
@@ -1898,7 +1898,7 @@ fn build_spqra_minimizer_sidecar_from_split_components(
                     let atom_idx = atom_by_virtual.get(vidx).copied().unwrap_or(INVALID);
                     if atom_idx != INVALID {
                         min_edge.flags = SPQRA_MIN_EDGE_HAS_BEHAVIOR_ATOM;
-                        min_edge.child_ref = atom_idx;
+                        min_edge.child_ref = atom_idx.into();
                     } else {
                         virtual_inc_count = virtual_inc_count.saturating_add(1);
                         if vidx < virtual_first.len() {

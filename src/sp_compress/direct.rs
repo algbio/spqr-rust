@@ -1,6 +1,6 @@
 use crate::sp_compress::types::{
-    make_child_edge, make_child_macro, ChildRef, CompressionResult, CoreEdge, SpNode, SpTree,
-    SP_KIND_PARALLEL, SP_KIND_SERIES,
+    child_as_edge, make_child_edge, make_child_macro, ChildRef, CompressionResult, CoreEdge,
+    SpNode, SpTree, SP_KIND_PARALLEL, SP_KIND_SERIES,
 };
 use crate::{EdgeId, NodeId};
 
@@ -671,7 +671,7 @@ fn make_path_child(
 ) -> (ChildRef, u32, u8) {
     if children.len() == 1 {
         let child = children[0];
-        return (child, child, 0);
+        return (child, child_as_edge(child).0, 0);
     }
     if left > right
         || (left == right
@@ -680,7 +680,7 @@ fn make_path_child(
         children.reverse();
         std::mem::swap(&mut left, &mut right);
     }
-    let first_edge = children[0];
+    let first_edge = child_as_edge(children[0]).0;
     let child = push_macro(tree, SP_KIND_SERIES, left, right, children);
     tree.stats.series_reductions += (children.len() - 1) as u32;
     (child, first_edge, SP_KIND_SERIES)
@@ -693,16 +693,16 @@ fn push_macro(
     right: u32,
     children: &[ChildRef],
 ) -> ChildRef {
-    let off = tree.children.len() as u32;
+    let off = tree.children.len() as u64;
     tree.children.extend_from_slice(children);
-    let mid = tree.macros.len() as u32;
+    let mid = tree.macros.len() as u64;
     tree.macros.push(SpNode {
         kind,
         _pad: [0; 3],
         left,
         right,
         children_offset: off,
-        children_count: children.len() as u32,
+        children_count: children.len() as u64,
     });
     make_child_macro(mid)
 }
@@ -713,16 +713,16 @@ fn push_parallel_macro(
     right: u32,
     children: &[CoreItem],
 ) -> ChildRef {
-    let off = tree.children.len() as u32;
+    let off = tree.children.len() as u64;
     tree.children.extend(children.iter().map(|item| item.child));
-    let mid = tree.macros.len() as u32;
+    let mid = tree.macros.len() as u64;
     tree.macros.push(SpNode {
         kind: SP_KIND_PARALLEL,
         _pad: [0; 3],
         left,
         right,
         children_offset: off,
-        children_count: children.len() as u32,
+        children_count: children.len() as u64,
     });
     make_child_macro(mid)
 }

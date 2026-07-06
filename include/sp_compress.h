@@ -25,6 +25,9 @@ typedef struct {
     uint64_t original_edge_id;
 } SpCompressInputEdge64;
 
+typedef uint64_t SpCompressChildRef;
+typedef uint64_t SpCompressSize;
+
 #define SP_COMPRESS_KIND_SERIES   1
 #define SP_COMPRESS_KIND_PARALLEL 2
 
@@ -34,14 +37,14 @@ typedef struct {
     uint8_t  _pad[3];
     uint32_t left;
     uint32_t right;
-    uint32_t children_offset;
-    uint32_t children_count;
+    SpCompressSize children_offset;
+    SpCompressSize children_count;
 } SpCompressNode;
 
 typedef struct {
     uint32_t u;
     uint32_t v;
-    uint32_t child;
+    SpCompressChildRef child;
 } SpCompressCoreEdge;
 
 typedef struct {
@@ -60,13 +63,13 @@ typedef struct {
 } SpCompressCoreEdge64;
 
 
-#define SP_COMPRESS_TAG_BIT      0x80000000u
-#define SP_COMPRESS_PAYLOAD_MASK 0x7FFFFFFFu
+#define SP_COMPRESS_TAG_BIT      UINT64_C(0x8000000000000000)
+#define SP_COMPRESS_PAYLOAD_MASK UINT64_C(0x7FFFFFFFFFFFFFFF)
 
 #define SP_COMPRESS_CHILD_IS_MACRO(c)  (((c) & SP_COMPRESS_TAG_BIT) != 0)
 #define SP_COMPRESS_CHILD_IS_EDGE(c)   (((c) & SP_COMPRESS_TAG_BIT) == 0)
-#define SP_COMPRESS_CHILD_AS_EDGE(c)   ((c))
-#define SP_COMPRESS_CHILD_AS_MACRO(c)  ((c) & SP_COMPRESS_PAYLOAD_MASK)
+#define SP_COMPRESS_CHILD_AS_EDGE(c)   ((uint32_t)(c))
+#define SP_COMPRESS_CHILD_AS_MACRO(c)  ((SpCompressSize)((c) & SP_COMPRESS_PAYLOAD_MASK))
 
 #define SP_COMPRESS_TAG_BIT64      0x8000000000000000ull
 #define SP_COMPRESS_PAYLOAD_MASK64 0x7FFFFFFFFFFFFFFFull
@@ -93,19 +96,19 @@ typedef struct {
 typedef struct {
 
     const SpCompressNode* macros_ptr;
-    uint32_t macros_len;
+    SpCompressSize macros_len;
 
-    const uint32_t* children_ptr;
-    uint32_t children_len;
+    const SpCompressChildRef* children_ptr;
+    SpCompressSize children_len;
 
     const SpCompressCoreEdge* core_edges_ptr;
-    uint32_t core_edges_len;
+    SpCompressSize core_edges_len;
 
     const uint32_t* core_nodes_ptr;
-    uint32_t core_nodes_len;
+    SpCompressSize core_nodes_len;
 
     const uint32_t* input_endpoints_ptr;
-    uint32_t input_endpoints_len;
+    SpCompressSize input_endpoints_len;
 
 
     SpCompressStats stats;
@@ -218,7 +221,7 @@ typedef struct {
 typedef struct {
     uint32_t twin_component;
     uint32_t twin_local_edge;
-    uint32_t child_ref;
+    SpCompressChildRef child_ref;
     uint32_t flags;
     uint32_t src_local;
     uint32_t dst_local;
@@ -239,7 +242,7 @@ typedef struct {
 } FfiSpqraBehaviorAtom;
 
 typedef struct {
-    uint32_t child_ref;
+    SpCompressChildRef child_ref;
     uint32_t flags;
     uint32_t src_core;
     uint32_t dst_core;
@@ -380,10 +383,60 @@ typedef struct {
     uint64_t items_len;
 } SpqraBehaviorAtomView64;
 
+typedef struct {
+    uint32_t root;
+    uint32_t node_count;
+
+    const uint8_t* node_types_ptr;
+    const uint32_t* node_parents_ptr;
+
+    const uint32_t* children_offsets_ptr;
+    uint32_t children_offsets_len;
+    const uint32_t* children_ptr;
+    uint32_t children_len;
+
+    const uint32_t* skeleton_offsets_ptr;
+    uint32_t skeleton_offsets_len;
+    const SkeletonEdge* skeleton_edges_ptr;
+    uint32_t skeleton_edges_len;
+
+    const uint32_t* node_mapping_offsets_ptr;
+    uint32_t node_mapping_offsets_len;
+    const uint32_t* node_mapping_ptr;
+    uint32_t node_mapping_len;
+
+    const uint32_t* skeleton_num_nodes_ptr;
+    uint32_t skeleton_num_nodes_len;
+} SpCompressCoreSpqrSnapshot;
+
+typedef struct {
+    const SpCompressNode* macros_ptr;
+    SpCompressSize macros_len;
+
+    const SpCompressChildRef* children_ptr;
+    SpCompressSize children_len;
+
+    const SpCompressCoreEdge* core_edges_ptr;
+    SpCompressSize core_edges_len;
+
+    const uint32_t* core_nodes_ptr;
+    SpCompressSize core_nodes_len;
+
+    const uint32_t* input_endpoints_ptr;
+    SpCompressSize input_endpoints_len;
+
+    SpCompressStats stats;
+
+    const SpCompressCoreSpqrSnapshot* core_spqr;
+    const uint32_t* core_node_inv_ptr;
+    uint32_t core_node_inv_len;
+} SpCompressSnapshotView;
+
 SpCompressHandle* sp_compress_ffi(
     uint32_t n_nodes,
     const SpCompressInputEdge* edges_ptr,
     uint32_t edges_len,
+    uint32_t max_original_edge_id,
     const uint8_t* contractible_ptr,
     uint32_t contractible_len,
     uint8_t build_core_spqr
@@ -405,6 +458,10 @@ SpCompressHandle* sp_compress_ffi_u64(
     const uint8_t* contractible_ptr,
     uint64_t contractible_len,
     uint8_t build_core_spqr
+);
+
+SpCompressHandle* sp_compress_from_snapshot_ffi(
+    const SpCompressSnapshotView* snapshot
 );
 
 void sp_compress_free(SpCompressHandle* handle);
@@ -432,6 +489,7 @@ struct SpqrResult* sp_compress_reconstruct_ffi(
     uint32_t n_nodes,
     const SpCompressInputEdge* edges_ptr,
     uint32_t edges_len,
+    uint32_t max_original_edge_id,
     const uint8_t* contractible_ptr,
     uint32_t contractible_len);
 
@@ -520,6 +578,7 @@ SpCompressHandle* sp_compress_timed_ffi(
     uint32_t n_nodes,
     const SpCompressInputEdge* edges_ptr,
     uint32_t edges_len,
+    uint32_t max_original_edge_id,
     const uint8_t* contractible_ptr,
     uint32_t contractible_len,
     uint8_t build_core_spqr,
@@ -566,6 +625,7 @@ struct SpqrResult* sp_compress_reconstruct_with_timings_ffi(
     uint32_t n_nodes,
     const SpCompressInputEdge* edges_ptr,
     uint32_t edges_len,
+    uint32_t max_original_edge_id,
     const uint8_t* contractible_ptr,
     uint32_t contractible_len,
     SpCompressStats* out_stats,

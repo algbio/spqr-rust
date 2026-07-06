@@ -601,7 +601,7 @@ fn materialize(
             if cn.kind == PK_ATOMIC {
                 mat_resolved.push(make_child_edge(cn.edge_id));
             } else {
-                let mm: SpNodeId = cn.edge_id.0;
+                let mm: SpNodeId = cn.edge_id.0 as SpNodeId;
                 mat_resolved.push(make_child_macro(mm));
             }
             c = next;
@@ -644,7 +644,7 @@ fn materialize(
             mat_resolved.extend(mat_sort_keys.iter().map(|&(_, _, r)| r));
         }
 
-        let children_offset = tree.children.len() as u32;
+        let children_offset = tree.children.len() as u64;
         for &cr in mat_resolved.iter() {
             tree.children.push(cr);
         }
@@ -659,13 +659,13 @@ fn materialize(
             left: left.0,
             right: right.0,
             children_offset,
-            children_count: mat_resolved.len() as u32,
+            children_count: mat_resolved.len() as u64,
         };
 
         let new_mid = tree.macros.len() as SpNodeId;
         tree.macros.push(m);
 
-        arena.pool[p as usize].edge_id = EdgeId(new_mid);
+        arena.pool[p as usize].edge_id = EdgeId(new_mid as u32);
 
         mat_stack.pop();
     }
@@ -674,7 +674,7 @@ fn materialize(
     if root.kind == PK_ATOMIC {
         return make_child_edge(root.edge_id);
     }
-    make_child_macro(root.edge_id.0)
+    make_child_macro(root.edge_id.0 as SpNodeId)
 }
 
 fn canonize_series_orientation(tree: &mut SpTree) {
