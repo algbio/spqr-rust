@@ -5,7 +5,6 @@ use crate::{spqr_thread_count, CANONICALIZE_ROOT_ENABLED};
 use std::sync::atomic::Ordering;
 use std::thread;
 
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
@@ -53,41 +52,6 @@ impl fmt::Debug for TreeNodeId {
 }
 
 pub const INVALID: u64 = u64::MAX;
-
-thread_local! {
-    static SKIP_ASSEMBLE_SPQRTREE: Cell<bool> = const { Cell::new(false) };
-    static SPQRA_CORE_CHILD_REFS: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
-}
-
-pub(crate) fn with_skip_assemble_spqr<T, F: FnOnce() -> T>(skip: bool, f: F) -> T {
-    SKIP_ASSEMBLE_SPQRTREE.with(|cell| {
-        let old = cell.replace(skip);
-        let out = f();
-        cell.set(old);
-        out
-    })
-}
-
-pub(crate) fn with_spqra_core_child_refs<T, F: FnOnce() -> T>(refs: Option<Vec<u64>>, f: F) -> T {
-    SPQRA_CORE_CHILD_REFS.with(|cell| {
-        let old = cell.replace(refs);
-        let out = f();
-        cell.replace(old);
-        out
-    })
-}
-
-fn spqra_core_child_ref(edge_id: usize) -> Option<u64> {
-    SPQRA_CORE_CHILD_REFS.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|refs| refs.get(edge_id).copied())
-    })
-}
-
-fn skip_assemble_spqr_requested() -> bool {
-    SKIP_ASSEMBLE_SPQRTREE.with(|cell| cell.get())
-}
 
 impl NodeId {
     pub const INVALID: NodeId = NodeId(INVALID);
@@ -414,10 +378,6 @@ pub struct SpqrTree {
     pub skeleton_num_nodes: Vec<u64>,
     pub edge_to_tree_node: Vec<TreeNodeId>,
     pub min_real_per_node: Vec<u64>,
-    pub preassembly_scad_export:
-        Option<std::sync::Arc<crate::sp_compress::integration::CoreScadExport>>,
-    pub preassembly_minimizer_sidecar:
-        Option<std::sync::Arc<crate::sp_compress::integration::SpqraMinimizerSidecar>>,
 }
 
 impl SpqrTree {
@@ -529,8 +489,6 @@ impl SpqrTree {
             skeleton_num_nodes: Vec::new(),
             edge_to_tree_node: vec![TreeNodeId::INVALID; num_edges],
             min_real_per_node: Vec::new(),
-            preassembly_scad_export: None,
-            preassembly_minimizer_sidecar: None,
         }
     }
 
@@ -565,8 +523,6 @@ impl SpqrTree {
             skeleton_num_nodes: vec![num_skel_nodes],
             edge_to_tree_node,
             min_real_per_node: vec![min_real],
-            preassembly_scad_export: None,
-            preassembly_minimizer_sidecar: None,
         }
     }
 }
@@ -679,8 +635,6 @@ impl SpqrTreeBuilder {
             skeleton_num_nodes: self.skeleton_num_nodes,
             edge_to_tree_node: self.edge_to_tree_node,
             min_real_per_node: self.min_real_per_node,
-            preassembly_scad_export: None,
-            preassembly_minimizer_sidecar: None,
         }
     }
 
@@ -698,8 +652,6 @@ impl SpqrTreeBuilder {
             skeleton_num_nodes: Vec::new(),
             edge_to_tree_node: self.edge_to_tree_node,
             min_real_per_node: Vec::new(),
-            preassembly_scad_export: None,
-            preassembly_minimizer_sidecar: None,
         }
     }
 }
@@ -716,10 +668,7 @@ struct SplitComponent {
     edges: Vec<StackEdge>,
     pole_a: u64,
     pole_b: u64,
-    origin: u8,
 }
-
-const SPLIT_ORIGIN_PRETRICONN_P_BOND: u8 = 1 << 1;
 
 #[inline]
 fn next_virtual_id(next_virtual: &mut u64) -> u64 {
@@ -763,17 +712,13 @@ struct PretriconnChainAnalysis {
     quotient_node_inv: Vec<u64>,
     quotient_labels: Vec<u64>,
     chain_components: Vec<SplitComponent>,
-    chain_atom_components: Vec<SplitComponent>,
 }
 
 fn extract_parallel_p_bonds_from_quotient(
     quotient_pairs: &mut Vec<u64>,
     quotient_labels: &mut Vec<u64>,
     chain_components: &mut Vec<SplitComponent>,
-    chain_atom_components: &mut Vec<SplitComponent>,
-    atomizable_virtuals: &mut HashMap<u64, ()>,
     next_virtual: &mut u64,
-    atomize_p_bonds: bool,
 ) {
     if quotient_labels.len() <= 1 || quotient_pairs.len() != quotient_labels.len().saturating_mul(2)
     {
@@ -825,24 +770,12 @@ fn extract_parallel_p_bonds_from_quotient(
             dst: b,
             eid: vid,
         });
-        let can_atomize = atomize_p_bonds
-            && keyed_edges[pos..end_pos].iter().all(|item| {
-                let label = pre_p_labels[item.2];
-                spqra_core_child_ref(label as usize).is_some()
-                    || atomizable_virtuals.contains_key(&label)
-            });
         let comp = SplitComponent {
             edges: comp_edges,
             pole_a: a,
             pole_b: b,
-            origin: SPLIT_ORIGIN_PRETRICONN_P_BOND,
         };
-        if can_atomize {
-            atomizable_virtuals.insert(vid, ());
-            chain_atom_components.push(comp);
-        } else {
-            chain_components.push(comp);
-        }
+        chain_components.push(comp);
         quotient_pairs.push(a);
         quotient_pairs.push(b);
         quotient_labels.push(vid);
@@ -883,17 +816,11 @@ fn group_parallel_p_bonds_only_before_triconn(
     }
 
     let mut chain_components = Vec::new();
-    let mut chain_atom_components = Vec::new();
-    let mut atomizable_virtuals: HashMap<u64, ()> = HashMap::new();
-    let atomize_p_bonds = skip_assemble_spqr_requested();
     extract_parallel_p_bonds_from_quotient(
         &mut quotient_pairs,
         &mut quotient_labels,
         &mut chain_components,
-        &mut chain_atom_components,
-        &mut atomizable_virtuals,
         next_virtual,
-        atomize_p_bonds,
     );
 
     let mut node_remap = vec![u64::MAX; n];
@@ -917,7 +844,6 @@ fn group_parallel_p_bonds_only_before_triconn(
         quotient_node_inv,
         quotient_labels,
         chain_components,
-        chain_atom_components,
     }
 }
 
@@ -1264,14 +1190,13 @@ fn build_spqr_tree_filtered_impl(
     let mut analysis_next_virtual = next_virtual;
     let analysis =
         group_parallel_p_bonds_only_before_triconn(base_wg, labels, &mut analysis_next_virtual);
-    if !analysis.chain_components.is_empty() || !analysis.chain_atom_components.is_empty() {
+    if !analysis.chain_components.is_empty() {
         owned_wg = Some(analysis.quotient);
         pretriconn_quotient_node_inv = Some(analysis.quotient_node_inv);
         weid_to_label = analysis.quotient_labels;
         relabel_edges = true;
         next_virtual = analysis_next_virtual;
         pretriconn_chain_comps = analysis.chain_components;
-        let _ = analysis.chain_atom_components;
     }
 
     let wg = owned_wg.as_ref().unwrap_or(graph);
@@ -1312,7 +1237,6 @@ fn build_spqr_tree_filtered_impl(
                 edges,
                 pole_a: pa,
                 pole_b: pb,
-                origin: 0,
             }]
         }
     };
@@ -1364,7 +1288,7 @@ fn build_spqr_tree_filtered_impl(
     add_timing!(t_combine_us, t_combine);
 
     let t_merge = Instant::now();
-    let _merged_component_types = Some(merge_same_type_components(&mut all, m));
+    merge_same_type_components(&mut all, m);
     if let Some(t) = timings.as_mut() {
         t.c_merged_components = all.len() as u64;
         t.c_virtual_id_span = next_virtual.saturating_sub(m as u64);
@@ -1446,8 +1370,6 @@ fn build_parallel_case(graph: &Graph, self_loops: SelfLoopFlags<'_>) -> SpqrTree
         skeleton_num_nodes: vec![2],
         edge_to_tree_node,
         min_real_per_node: vec![min_real],
-        preassembly_scad_export: None,
-        preassembly_minimizer_sidecar: None,
     }
 }
 
@@ -1595,7 +1517,6 @@ fn split_multi_edges(
             edges,
             pole_a: a,
             pole_b: b,
-            origin: 0,
         });
         synthetic.push((a, b, vid));
     }
@@ -2302,7 +2223,6 @@ fn triconn_decompose(
                             ],
                             pole_a: v,
                             pole_b: x,
-                            origin: 0,
                         });
                         if let Some(&et) = estack.last() {
                             if me_src[et as usize] == x && me_dst[et as usize] == v {
@@ -2333,7 +2253,6 @@ fn triconn_decompose(
                                 ],
                                 pole_a: v,
                                 pole_b: x,
-                                origin: 0,
                             });
                             degree[x as usize] -= 1;
                             degree[v as usize] -= 1;
@@ -2387,7 +2306,6 @@ fn triconn_decompose(
                             edges: ce,
                             pole_a: pa,
                             pole_b: pb,
-                            origin: 0,
                         });
                         let x = pb;
                         let mut cur_virt = ev;
@@ -2411,7 +2329,6 @@ fn triconn_decompose(
                                 ],
                                 pole_a: v,
                                 pole_b: x,
-                                origin: 0,
                             });
                             degree[x as usize] -= 1;
                             degree[v as usize] -= 1;
@@ -2465,7 +2382,6 @@ fn triconn_decompose(
                     edges: ce,
                     pole_a: v,
                     pole_b: pl,
-                    origin: 0,
                 });
 
                 if (xx == vn && yy == l1) || (yy == vn && xx == l1) {
@@ -2491,7 +2407,6 @@ fn triconn_decompose(
                             ],
                             pole_a: v,
                             pole_b: pl,
-                            origin: 0,
                         });
                         me_hi_slot[nv2 as usize] = me_hi_slot[eh as usize];
                         degree[v as usize] -= 1;
@@ -2540,7 +2455,6 @@ fn triconn_decompose(
                         ],
                         pole_a: pl,
                         pole_b: v,
-                        origin: 0,
                     });
                     tree_arc[v as usize] = nv2;
                     me_etype[nv2 as usize] = 1;
@@ -2613,7 +2527,6 @@ fn triconn_decompose(
             edges: rem,
             pole_a: pa,
             pole_b: pb,
-            origin: 0,
         });
     }
 
@@ -2819,7 +2732,6 @@ fn split_internal_parallels(comp: SplitComponent, next_virtual: &mut u64) -> Vec
                 edges: bond_edges,
                 pole_a: a,
                 pole_b: b,
-                origin: comp.origin,
             });
             remainder_edges.push(StackEdge {
                 src: a,
@@ -2834,7 +2746,6 @@ fn split_internal_parallels(comp: SplitComponent, next_virtual: &mut u64) -> Vec
         edges: remainder_edges,
         pole_a: comp.pole_a,
         pole_b: comp.pole_b,
-        origin: comp.origin,
     });
     result
 }
@@ -2988,7 +2899,6 @@ fn merge_same_type_components(comps: &mut Vec<SplitComponent>, m: usize) -> Vec<
             }
 
             visited[j] = true;
-            comps[i].origin |= comps[j].origin;
 
             let mut j_edges = std::mem::take(&mut comps[j].edges);
             j_edges.retain(|e| e.eid != eid);

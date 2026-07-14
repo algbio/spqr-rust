@@ -7,10 +7,13 @@ pub mod ffi;
 pub mod integration;
 pub mod iso;
 pub mod pmap;
+pub(crate) mod pmap32;
 pub mod reconstruct;
 pub mod reconstruct_wide;
 pub mod reduction;
+pub(crate) mod reduction32;
 pub mod types;
+pub(crate) mod types32;
 
 pub use integration::{
     compress_and_build_spqr, compress_and_build_spqr_borrowed, CompressAndSpqrResult,

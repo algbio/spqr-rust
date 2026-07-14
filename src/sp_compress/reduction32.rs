@@ -1,141 +1,12 @@
 use crate::sp_compress::adj::{AdjStore, INVALID_ADJ};
 use crate::sp_compress::arena::{PNodeArena, INVALID_PNODE, PK_ATOMIC, PK_PARALLEL, PK_SERIES};
-use crate::sp_compress::pmap::{make_pair_key, pair_first, pair_second, FlatPairMap, PairKey};
-use crate::sp_compress::types::{
+use crate::sp_compress::pmap32::{make_pair_key, pair_first, pair_second, FlatPairMap, PairKey};
+use crate::sp_compress::types32::{
     child_as_edge, child_as_macro, child_is_edge, child_is_macro, make_child_edge,
-    make_child_macro, ChildRef, CompressionInput, CompressionResult, CoreEdge, InputEdge, SpNode,
-    SpNodeId, SpTree, SP_KIND_PARALLEL, SP_KIND_SERIES,
+    make_child_macro, ChildRef, CompressionResult, CoreEdge, SpNode, SpNodeId, SpTree,
+    SP_KIND_PARALLEL, SP_KIND_SERIES,
 };
 use crate::{EdgeId, NodeId};
-use std::time::Instant;
-
-#[derive(Default, Clone, Copy, Debug)]
-pub(crate) struct CompressionTimings {
-    pub t_input_edges_us: u64,
-    pub t_init_work_us: u64,
-    pub t_init_dirty_us: u64,
-    pub t_reduce_series_us: u64,
-    pub t_reduce_parallel_us: u64,
-    pub t_materialize_us: u64,
-    pub t_cleanup_us: u64,
-    pub t_canon_series_us: u64,
-    pub t_sort_core_edges_us: u64,
-    pub t_collect_core_nodes_us: u64,
-    pub t_stats_shrink_us: u64,
-}
-
-const COMPACT_PAYLOAD_MAX: u32 = 0x7FFF_FFFF;
-
-#[inline]
-fn needs_wide_child_refs_for_max(edge_count: usize, max_original_edge_id: u32) -> bool {
-    edge_count > COMPACT_PAYLOAD_MAX as usize || max_original_edge_id > COMPACT_PAYLOAD_MAX
-}
-
-#[inline]
-fn max_original_edge_id(input_edges: &[InputEdge]) -> u32 {
-    input_edges
-        .iter()
-        .map(|edge| edge.original_edge_id.0)
-        .max()
-        .unwrap_or(0)
-}
-
-fn widen_tree(tree: crate::sp_compress::types32::SpTree) -> SpTree {
-    let widen_child = |child: crate::sp_compress::types32::ChildRef| {
-        if crate::sp_compress::types32::child_is_macro(child) {
-            make_child_macro(u64::from(crate::sp_compress::types32::child_as_macro(
-                child,
-            )))
-        } else {
-            make_child_edge(crate::sp_compress::types32::child_as_edge(child))
-        }
-    };
-
-    SpTree {
-        macros: tree
-            .macros
-            .into_iter()
-            .map(|node| SpNode {
-                kind: node.kind,
-                _pad: node._pad,
-                left: node.left,
-                right: node.right,
-                children_offset: node.children_offset as u64,
-                children_count: node.children_count as u64,
-            })
-            .collect(),
-        children: tree.children.into_iter().map(widen_child).collect(),
-        core_edges: tree
-            .core_edges
-            .into_iter()
-            .map(|edge| CoreEdge {
-                u: edge.u,
-                v: edge.v,
-                child: widen_child(edge.child),
-            })
-            .collect(),
-        core_nodes: tree.core_nodes,
-        input_endpoints: tree.input_endpoints,
-        stats: tree.stats,
-    }
-}
-
-fn widen_result(result: crate::sp_compress::types32::CompressionResult) -> CompressionResult {
-    CompressionResult {
-        tree: widen_tree(result.tree),
-        success: result.success,
-        error_message: result.error_message,
-    }
-}
-
-pub fn compress(input: &CompressionInput) -> CompressionResult {
-    compress_borrowed_with_max_original_edge_id(
-        input.n_nodes,
-        &input.edges,
-        &input.contractible,
-        max_original_edge_id(&input.edges),
-    )
-}
-
-pub fn compress_borrowed(
-    n_nodes: u32,
-    input_edges: &[InputEdge],
-    contractible: &[u8],
-) -> CompressionResult {
-    compress_borrowed_with_max_original_edge_id(
-        n_nodes,
-        input_edges,
-        contractible,
-        max_original_edge_id(input_edges),
-    )
-}
-
-pub(crate) fn compress_borrowed_with_max_original_edge_id(
-    n_nodes: u32,
-    input_edges: &[InputEdge],
-    contractible: &[u8],
-    max_original_edge_id: u32,
-) -> CompressionResult {
-    if needs_wide_child_refs_for_max(input_edges.len(), max_original_edge_id) {
-        compress_borrowed_wide(n_nodes, input_edges, contractible)
-    } else {
-        widen_result(crate::sp_compress::reduction32::compress_borrowed(
-            n_nodes,
-            input_edges,
-            contractible,
-        ))
-    }
-}
-
-pub(crate) fn compress_borrowed_timed(
-    n_nodes: u32,
-    input_edges: &[InputEdge],
-    contractible: &[u8],
-) -> (CompressionResult, CompressionTimings) {
-    let mut timings = CompressionTimings::default();
-    let result = compress_borrowed_impl(n_nodes, input_edges, contractible, Some(&mut timings));
-    (result, timings)
-}
 
 #[derive(Clone, Copy, Debug)]
 struct WorkEdge {
@@ -154,35 +25,16 @@ fn work_deactivate(w: &mut WorkEdge) {
     w.pnode = INVALID_PNODE;
 }
 
-fn compress_borrowed_wide(
+pub fn compress_borrowed(
     n_nodes: u32,
-    input_edges: &[crate::sp_compress::types::InputEdge],
+    input_edges: &[crate::sp_compress::types32::InputEdge],
     contractible: &[u8],
 ) -> CompressionResult {
-    compress_borrowed_impl(n_nodes, input_edges, contractible, None)
-}
-
-fn compress_borrowed_impl(
-    n_nodes: u32,
-    input_edges: &[crate::sp_compress::types::InputEdge],
-    contractible: &[u8],
-    mut timings: Option<&mut CompressionTimings>,
-) -> CompressionResult {
-    macro_rules! add_timing {
-        ($field:ident, $start:expr) => {
-            if let Some(t) = timings.as_mut() {
-                t.$field += $start.elapsed().as_micros() as u64;
-            }
-        };
-    }
-
     let mut tree = SpTree::default();
     tree.stats.input_nodes = n_nodes;
     tree.stats.input_edges = input_edges.len() as u32;
 
-    let t_input_edges = Instant::now();
     tree.set_input_edges(input_edges);
-    add_timing!(t_input_edges_us, t_input_edges);
 
     if contractible.len() < n_nodes as usize {
         return CompressionResult {
@@ -192,15 +44,12 @@ fn compress_borrowed_impl(
         };
     }
 
-    let n_nodes_usize = n_nodes as usize;
-    let t_init_work = Instant::now();
-
     let mut arena = PNodeArena::new();
     arena.reserve(input_edges.len() * 5 / 4 + 16);
 
     let mut adj = AdjStore::new();
 
-    let mut pmap = FlatPairMap::new();
+    let mut pmap = FlatPairMap::default();
     pmap.init(input_edges.len() + 16);
 
     let pnode_start = arena.bulk_init_atomic(input_edges);
@@ -232,42 +81,43 @@ fn compress_borrowed_impl(
             apply_on_seen(r, edge_idx, &mut edges);
         }
     }
-    add_timing!(t_init_work_us, t_init_work);
-
-    let t_init_dirty = Instant::now();
     let mut node_dirty: Vec<NodeId> = Vec::new();
-    let mut node_in_dirty: Vec<u64> = vec![0; n_nodes_usize.div_ceil(64)];
-    for v_idx in 0..n_nodes_usize {
+    let mut node_in_dirty: Vec<u64> = vec![0; (n_nodes as usize).div_ceil(64)];
+
+    let n_nodes = n_nodes as usize;
+
+    for v_idx in 0..n_nodes {
+        let v = NodeId(v_idx as u32);
         if contractible[v_idx] != 0 && adj.deg[v_idx] == 2 {
             let bit = 1u64 << (v_idx & 63);
-            node_in_dirty[v_idx >> 6] |= bit;
-            node_dirty.push(NodeId(v_idx as u32));
+            let w = &mut node_in_dirty[v_idx >> 6];
+            if (*w & bit) == 0 {
+                *w |= bit;
+                node_dirty.push(v);
+            }
         }
     }
 
     let mut pair_dirty: Vec<PairKey> = Vec::new();
+
     if !pmap.buckets.is_empty() {
         for slot in pmap.slots.iter() {
             let v = slot.value;
             if FlatPairMap::is_indirect(v) {
                 let bid = FlatPairMap::bucket_index(v) as usize;
-                if pmap.buckets[bid].live_count() >= 2 {
+                if pmap.buckets[bid].count >= 2 {
                     pair_dirty.push(slot.key);
                 }
             }
         }
     }
-    add_timing!(t_init_dirty_us, t_init_dirty);
-
     let mut series_reductions: u32 = 0;
     let mut parallel_reductions: u32 = 0;
 
     let mut bucket_edges_buf: Vec<u32> = Vec::with_capacity(64);
     let mut kid_pnodes_buf: Vec<u32> = Vec::with_capacity(64);
-    let mut flat_pnodes_buf: Vec<u32> = Vec::with_capacity(64);
 
     while !node_dirty.is_empty() || !pair_dirty.is_empty() {
-        let t_reduce_series = Instant::now();
         while let Some(v) = node_dirty.pop() {
             let v_idx = v.idx();
             node_in_dirty[v_idx >> 6] &= !(1u64 << (v_idx & 63));
@@ -330,19 +180,20 @@ fn compress_borrowed_impl(
                 &mut node_in_dirty,
                 &mut pair_dirty,
                 contractible,
-                n_nodes_usize,
+                n_nodes,
             );
             series_reductions += 1;
         }
-        add_timing!(t_reduce_series_us, t_reduce_series);
 
-        let t_reduce_parallel = Instant::now();
         while let Some(k) = pair_dirty.pop() {
-            let bid = match bucket_compact(&mut pmap, &mut edges, k) {
+            bucket_compact(&mut pmap, &mut edges, k);
+
+            let bid_opt = pmap.find_bucket(k);
+            let bid = match bid_opt {
                 Some(b) => b,
                 None => continue,
             };
-            if pmap.buckets[bid as usize].live_count() < 2 {
+            if pmap.buckets[bid as usize].count < 2 {
                 continue;
             }
 
@@ -369,8 +220,7 @@ fn compress_borrowed_impl(
                 kid_pnodes_buf.push(edges[idx as usize].pnode);
             }
 
-            let merged =
-                arena.make_parallel_with_scratch(a, c, &kid_pnodes_buf, &mut flat_pnodes_buf);
+            let merged = arena.make_parallel(a, c, &kid_pnodes_buf);
 
             for &idx in &bucket_edges_buf {
                 let (eu, ev, eau, eav) = {
@@ -396,21 +246,18 @@ fn compress_borrowed_impl(
                 &mut node_in_dirty,
                 &mut pair_dirty,
                 contractible,
-                n_nodes_usize,
+                n_nodes,
             );
             parallel_reductions += 1;
         }
-        add_timing!(t_reduce_parallel_us, t_reduce_parallel);
     }
 
-    let t_materialize = Instant::now();
-    let mut node_used: Vec<u64> = vec![0u64; n_nodes_usize.div_ceil(64)];
+    let mut node_used: Vec<u64> = vec![0u64; n_nodes.div_ceil(64)];
 
     tree.children.reserve(input_edges.len());
 
     let mut mat_stack: Vec<(u32, u8)> = Vec::with_capacity(64);
     let mut mat_resolved: Vec<ChildRef> = Vec::with_capacity(64);
-    let mut mat_sort_keys: Vec<(u32, u32, ChildRef)> = Vec::with_capacity(64);
 
     for i in 0..edges.len() {
         let (epn, mut ce_u, mut ce_v) = {
@@ -431,7 +278,6 @@ fn compress_borrowed_impl(
             &mut tree,
             &mut mat_stack,
             &mut mat_resolved,
-            &mut mat_sort_keys,
         );
 
         if ce_u.0 > ce_v.0 {
@@ -443,9 +289,6 @@ fn compress_borrowed_impl(
             child: root_ref,
         });
     }
-    add_timing!(t_materialize_us, t_materialize);
-
-    let t_cleanup = Instant::now();
     arena.drop_storage();
     let _ = std::mem::take(&mut edges);
     adj.drop_storage();
@@ -453,29 +296,21 @@ fn compress_borrowed_impl(
     let _ = std::mem::take(&mut node_dirty);
     let _ = std::mem::take(&mut node_in_dirty);
     let _ = std::mem::take(&mut pair_dirty);
-    add_timing!(t_cleanup_us, t_cleanup);
 
-    let t_canon_series = Instant::now();
     canonize_series_orientation(&mut tree);
-    add_timing!(t_canon_series_us, t_canon_series);
 
-    let t_sort_core_edges = Instant::now();
     tree.core_edges.sort_unstable_by(|a, b| {
         a.u.cmp(&b.u)
             .then(a.v.cmp(&b.v))
             .then(a.child.cmp(&b.child))
     });
-    add_timing!(t_sort_core_edges_us, t_sort_core_edges);
 
-    let t_collect_core_nodes = Instant::now();
-    for v_idx in 0..n_nodes_usize {
+    for v_idx in 0..n_nodes {
         if (node_used[v_idx >> 6] & (1u64 << (v_idx & 63))) != 0 {
             tree.core_nodes.push(NodeId(v_idx as u32));
         }
     }
-    add_timing!(t_collect_core_nodes_us, t_collect_core_nodes);
 
-    let t_stats_shrink = Instant::now();
     tree.stats.iterations = 1;
     tree.stats.series_reductions = series_reductions;
     tree.stats.parallel_reductions = parallel_reductions;
@@ -488,7 +323,11 @@ fn compress_borrowed_impl(
 
     tree.update_stats();
 
-    add_timing!(t_stats_shrink_us, t_stats_shrink);
+    tree.macros.shrink_to_fit();
+    tree.children.shrink_to_fit();
+    tree.core_edges.shrink_to_fit();
+    tree.core_nodes.shrink_to_fit();
+    tree.input_endpoints.shrink_to_fit();
 
     CompressionResult {
         tree,
@@ -499,53 +338,25 @@ fn compress_borrowed_impl(
 
 #[inline(always)]
 fn apply_on_seen(
-    result: crate::sp_compress::pmap::OnSeenResult,
+    result: crate::sp_compress::pmap32::OnSeenResult,
     edge_idx: u32,
     edges: &mut [WorkEdge],
 ) {
-    use crate::sp_compress::pmap::OnSeenResult;
+    use crate::sp_compress::pmap32::OnSeenResult;
     match result {
         OnSeenResult::SingleStored => {}
-        OnSeenResult::InsertedFirst { bucket_next, .. } => {
+        OnSeenResult::InsertedFirst { bucket_next } => {
             edges[edge_idx as usize].bucket_next = bucket_next;
         }
         OnSeenResult::PromotedAndInserted {
             promoted_edge,
             bucket_next,
-            ..
         } => {
             edges[promoted_edge as usize].bucket_next = u32::MAX;
 
             edges[edge_idx as usize].bucket_next = bucket_next;
         }
     }
-}
-
-#[inline]
-fn enqueue_dirty_if_degree_two(
-    w: NodeId,
-    adj: &AdjStore,
-    node_dirty: &mut Vec<NodeId>,
-    node_in_dirty: &mut [u64],
-    contractible: &[u8],
-    n_nodes: usize,
-) {
-    let wi = w.idx();
-    if wi >= n_nodes {
-        return;
-    }
-    if contractible[wi] == 0 {
-        return;
-    }
-    if adj.deg[wi] != 2 {
-        return;
-    }
-    let bit = 1u64 << (wi & 63);
-    if (node_in_dirty[wi >> 6] & bit) != 0 {
-        return;
-    }
-    node_in_dirty[wi >> 6] |= bit;
-    node_dirty.push(w);
 }
 
 #[inline]
@@ -582,28 +393,50 @@ fn add_new_edge(
     if u != v {
         let k = make_pair_key(u, v);
         let r = pmap.on_seen(k, idx);
-        if matches!(
+
+        let needs_pair_dirty = matches!(
             r,
-            crate::sp_compress::pmap::OnSeenResult::InsertedFirst { .. }
-                | crate::sp_compress::pmap::OnSeenResult::PromotedAndInserted { .. }
-        ) {
+            crate::sp_compress::pmap32::OnSeenResult::PromotedAndInserted { .. }
+                | crate::sp_compress::pmap32::OnSeenResult::InsertedFirst { .. }
+        );
+        apply_on_seen(r, idx, edges);
+        if needs_pair_dirty {
             pair_dirty.push(k);
         }
-        apply_on_seen(r, idx, edges);
     }
 
-    enqueue_dirty_if_degree_two(u, adj, node_dirty, node_in_dirty, contractible, n_nodes);
+    let try_enq = |w: NodeId, node_dirty: &mut Vec<NodeId>, node_in_dirty: &mut [u64]| {
+        let wi = w.idx();
+        if wi >= n_nodes {
+            return;
+        }
+        if contractible[wi] == 0 {
+            return;
+        }
+        if adj.deg[wi] != 2 {
+            return;
+        }
+        let bit = 1u64 << (wi & 63);
+        if (node_in_dirty[wi >> 6] & bit) != 0 {
+            return;
+        }
+        node_in_dirty[wi >> 6] |= bit;
+        node_dirty.push(w);
+    };
+    try_enq(u, node_dirty, node_in_dirty);
     if u != v {
-        enqueue_dirty_if_degree_two(v, adj, node_dirty, node_in_dirty, contractible, n_nodes);
+        try_enq(v, node_dirty, node_in_dirty);
     }
 
     idx
 }
 
 #[inline]
-fn bucket_compact(pmap: &mut FlatPairMap, edges: &mut [WorkEdge], k: PairKey) -> Option<u32> {
-    let bid = pmap.find_bucket(k)?;
-    pmap.mark_bucket_clean(bid);
+fn bucket_compact(pmap: &mut FlatPairMap, edges: &mut [WorkEdge], k: PairKey) {
+    let bid = match pmap.find_bucket(k) {
+        Some(b) => b,
+        None => return,
+    };
     let bid_us = bid as usize;
     let mut cur = pmap.buckets[bid_us].head;
     let mut new_head: u32 = u32::MAX;
@@ -619,12 +452,10 @@ fn bucket_compact(pmap: &mut FlatPairMap, edges: &mut [WorkEdge], k: PairKey) ->
         cur = nxt;
     }
     pmap.buckets[bid_us].head = new_head;
-    pmap.buckets[bid_us].set_live_count(kept);
+    pmap.buckets[bid_us].count = kept;
     if kept == 0 {
         pmap.erase_pair(k);
-        return None;
     }
-    Some(bid)
 }
 
 fn materialize(
@@ -633,7 +464,6 @@ fn materialize(
     tree: &mut SpTree,
     mat_stack: &mut Vec<(u32, u8)>,
     mat_resolved: &mut Vec<ChildRef>,
-    mat_sort_keys: &mut Vec<(u32, u32, ChildRef)>,
 ) -> ChildRef {
     mat_stack.clear();
     mat_stack.push((root_pnode, 0));
@@ -669,50 +499,58 @@ fn materialize(
             if cn.kind == PK_ATOMIC {
                 mat_resolved.push(make_child_edge(cn.edge_id));
             } else {
-                let mm: SpNodeId = cn.edge_id.0 as SpNodeId;
+                let mm: SpNodeId = cn.edge_id.0;
                 mat_resolved.push(make_child_macro(mm));
             }
             c = next;
         }
 
-        if kind == PK_PARALLEL && mat_resolved.len() > 1 {
+        if kind == PK_PARALLEL {
             let macros_snapshot: &[SpNode] = &tree.macros;
             let children_snapshot: &[ChildRef] = &tree.children;
-            let first_edge_of = |r: ChildRef| -> u32 {
-                if child_is_edge(r) {
-                    return child_as_edge(r).0;
-                }
-                let mut cur = r;
-                while child_is_macro(cur) {
-                    let m = &macros_snapshot[child_as_macro(cur) as usize];
-                    if m.children_count == 0 {
-                        return EdgeId::INVALID.0;
-                    }
-                    cur = children_snapshot[m.children_offset as usize];
-                }
-                if child_is_edge(cur) {
-                    child_as_edge(cur).0
-                } else {
-                    EdgeId::INVALID.0
-                }
-            };
-
-            mat_sort_keys.clear();
-            mat_sort_keys.reserve(mat_resolved.len());
-            for &r in mat_resolved.iter() {
-                let kind_key = if child_is_edge(r) {
+            mat_resolved.sort_unstable_by(|&ra, &rb| {
+                let ka: u32 = if child_is_edge(ra) {
                     0
                 } else {
-                    macros_snapshot[child_as_macro(r) as usize].kind as u32
+                    macros_snapshot[child_as_macro(ra) as usize].kind as u32
                 };
-                mat_sort_keys.push((kind_key, first_edge_of(r), r));
-            }
-            mat_sort_keys.sort_unstable();
-            mat_resolved.clear();
-            mat_resolved.extend(mat_sort_keys.iter().map(|&(_, _, r)| r));
+                let kb: u32 = if child_is_edge(rb) {
+                    0
+                } else {
+                    macros_snapshot[child_as_macro(rb) as usize].kind as u32
+                };
+                if ka != kb {
+                    return ka.cmp(&kb);
+                }
+
+                let first_edge_of = |r: ChildRef| -> EdgeId {
+                    if child_is_edge(r) {
+                        return child_as_edge(r);
+                    }
+                    let mut cur = r;
+                    while child_is_macro(cur) {
+                        let m = &macros_snapshot[child_as_macro(cur) as usize];
+                        if m.children_count == 0 {
+                            return EdgeId::INVALID;
+                        }
+                        cur = children_snapshot[m.children_offset as usize];
+                    }
+                    if child_is_edge(cur) {
+                        child_as_edge(cur)
+                    } else {
+                        EdgeId::INVALID
+                    }
+                };
+                let ea = first_edge_of(ra);
+                let eb = first_edge_of(rb);
+                if ea != eb {
+                    return ea.cmp(&eb);
+                }
+                ra.cmp(&rb)
+            });
         }
 
-        let children_offset = tree.children.len() as u64;
+        let children_offset = tree.children.len() as u32;
         for &cr in mat_resolved.iter() {
             tree.children.push(cr);
         }
@@ -727,13 +565,13 @@ fn materialize(
             left: left.0,
             right: right.0,
             children_offset,
-            children_count: mat_resolved.len() as u64,
+            children_count: mat_resolved.len() as u32,
         };
 
         let new_mid = tree.macros.len() as SpNodeId;
         tree.macros.push(m);
 
-        arena.pool[p as usize].edge_id = EdgeId(new_mid as u32);
+        arena.pool[p as usize].edge_id = EdgeId(new_mid);
 
         mat_stack.pop();
     }
@@ -742,7 +580,7 @@ fn materialize(
     if root.kind == PK_ATOMIC {
         return make_child_edge(root.edge_id);
     }
-    make_child_macro(root.edge_id.0 as SpNodeId)
+    make_child_macro(root.edge_id.0)
 }
 
 fn canonize_series_orientation(tree: &mut SpTree) {
@@ -800,45 +638,5 @@ fn canonize_series_orientation(tree: &mut SpTree) {
             let mref = &mut tree.macros[mid];
             std::mem::swap(&mut mref.left, &mut mref.right);
         }
-    }
-}
-
-#[cfg(test)]
-mod dispatch_tests {
-    use super::*;
-
-    fn edge(id: u32) -> InputEdge {
-        InputEdge {
-            u: NodeId(0),
-            v: NodeId(1),
-            original_edge_id: EdgeId(id),
-        }
-    }
-
-    #[test]
-    fn dispatch_switches_at_tag_payload_limit() {
-        let compact = [edge(COMPACT_PAYLOAD_MAX)];
-        let wide = [edge(COMPACT_PAYLOAD_MAX + 1)];
-        assert!(!needs_wide_child_refs_for_max(
-            compact.len(),
-            max_original_edge_id(&compact)
-        ));
-        assert!(needs_wide_child_refs_for_max(
-            wide.len(),
-            max_original_edge_id(&wide)
-        ));
-    }
-
-    #[test]
-    fn wide_path_preserves_edge_id_at_two_to_31() {
-        let edge_id = EdgeId(COMPACT_PAYLOAD_MAX + 1);
-        let edges = [edge(edge_id.0)];
-        let result = compress_borrowed(2, &edges, &[1, 1]);
-        assert!(result.success);
-        assert_eq!(result.tree.core_edges.len(), 1);
-
-        let child = result.tree.core_edges[0].child;
-        assert!(crate::sp_compress::types::child_is_edge(child));
-        assert_eq!(crate::sp_compress::types::child_as_edge(child), edge_id);
     }
 }

@@ -219,8 +219,6 @@ pub(crate) fn reconstruct_fully_reducible_timed(
                 skeleton_num_nodes: Vec::new(),
                 edge_to_tree_node: vec![TreeNodeId::INVALID; n_real_edges],
                 min_real_per_node: Vec::new(),
-                preassembly_scad_export: None,
-                preassembly_minimizer_sidecar: None,
             },
             timings,
         );
@@ -245,8 +243,6 @@ pub(crate) fn reconstruct_fully_reducible_timed(
                 skeleton_num_nodes: Vec::new(),
                 edge_to_tree_node: vec![TreeNodeId::INVALID; n_real_edges],
                 min_real_per_node: Vec::new(),
-                preassembly_scad_export: None,
-                preassembly_minimizer_sidecar: None,
             },
             timings,
         );
@@ -1482,8 +1478,6 @@ impl Builder {
             skeleton_num_nodes,
             edge_to_tree_node,
             min_real_per_node,
-            preassembly_scad_export: None,
-            preassembly_minimizer_sidecar: None,
         }
     }
 }

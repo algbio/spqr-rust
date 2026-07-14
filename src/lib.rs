@@ -49,7 +49,6 @@ pub use connected::{
     ConnectedComponents,
 };
 
-use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
@@ -94,41 +93,6 @@ impl fmt::Debug for TreeNodeId {
 }
 
 pub const INVALID: u32 = u32::MAX;
-
-thread_local! {
-    static SKIP_ASSEMBLE_SPQRTREE: Cell<bool> = const { Cell::new(false) };
-    static SPQRA_CORE_CHILD_REFS: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
-}
-
-pub(crate) fn with_skip_assemble_spqr<T, F: FnOnce() -> T>(skip: bool, f: F) -> T {
-    SKIP_ASSEMBLE_SPQRTREE.with(|cell| {
-        let old = cell.replace(skip);
-        let out = f();
-        cell.set(old);
-        out
-    })
-}
-
-pub(crate) fn with_spqra_core_child_refs<T, F: FnOnce() -> T>(refs: Option<Vec<u64>>, f: F) -> T {
-    SPQRA_CORE_CHILD_REFS.with(|cell| {
-        let old = cell.replace(refs);
-        let out = f();
-        cell.replace(old);
-        out
-    })
-}
-
-fn spqra_core_child_ref(edge_id: usize) -> Option<u64> {
-    SPQRA_CORE_CHILD_REFS.with(|cell| {
-        cell.borrow()
-            .as_ref()
-            .and_then(|refs| refs.get(edge_id).copied())
-    })
-}
-
-fn skip_assemble_spqr_requested() -> bool {
-    SKIP_ASSEMBLE_SPQRTREE.with(|cell| cell.get())
-}
 
 impl NodeId {
     pub const INVALID: NodeId = NodeId(INVALID);
@@ -458,10 +422,6 @@ pub struct SpqrTree {
     pub skeleton_num_nodes: Vec<u32>,
     pub edge_to_tree_node: Vec<TreeNodeId>,
     pub min_real_per_node: Vec<u32>,
-    pub preassembly_scad_export:
-        Option<std::sync::Arc<crate::sp_compress::integration::CoreScadExport>>,
-    pub preassembly_minimizer_sidecar:
-        Option<std::sync::Arc<crate::sp_compress::integration::SpqraMinimizerSidecar>>,
 }
 
 impl SpqrTree {
@@ -573,8 +533,6 @@ impl SpqrTree {
             skeleton_num_nodes: Vec::new(),
             edge_to_tree_node: vec![TreeNodeId::INVALID; num_edges],
             min_real_per_node: Vec::new(),
-            preassembly_scad_export: None,
-            preassembly_minimizer_sidecar: None,
         }
     }
 
@@ -609,8 +567,6 @@ impl SpqrTree {
             skeleton_num_nodes: vec![num_skel_nodes],
             edge_to_tree_node,
             min_real_per_node: vec![min_real],
-            preassembly_scad_export: None,
-            preassembly_minimizer_sidecar: None,
         }
     }
 }
@@ -725,8 +681,6 @@ impl SpqrTreeBuilder {
             skeleton_num_nodes: self.skeleton_num_nodes,
             edge_to_tree_node: self.edge_to_tree_node,
             min_real_per_node: self.min_real_per_node,
-            preassembly_scad_export: None,
-            preassembly_minimizer_sidecar: None,
         }
     }
 
@@ -744,8 +698,6 @@ impl SpqrTreeBuilder {
             skeleton_num_nodes: Vec::new(),
             edge_to_tree_node: self.edge_to_tree_node,
             min_real_per_node: Vec::new(),
-            preassembly_scad_export: None,
-            preassembly_minimizer_sidecar: None,
         }
     }
 }
@@ -762,10 +714,7 @@ struct SplitComponent {
     edges: Vec<StackEdge>,
     pole_a: u32,
     pole_b: u32,
-    origin: u8,
 }
-
-const SPLIT_ORIGIN_PRETRICONN_P_BOND: u8 = 1 << 1;
 
 #[derive(Default, Clone, Copy, Debug)]
 pub(crate) struct SpqrRawBuildTimings {
@@ -799,17 +748,13 @@ struct PretriconnChainAnalysis {
     quotient_node_inv: Vec<u32>,
     quotient_labels: Vec<u32>,
     chain_components: Vec<SplitComponent>,
-    chain_atom_components: Vec<SplitComponent>,
 }
 
 fn extract_parallel_p_bonds_from_quotient(
     quotient_pairs: &mut Vec<u32>,
     quotient_labels: &mut Vec<u32>,
     chain_components: &mut Vec<SplitComponent>,
-    chain_atom_components: &mut Vec<SplitComponent>,
-    atomizable_virtuals: &mut HashMap<u32, ()>,
     next_virtual: &mut u32,
-    atomize_p_bonds: bool,
 ) {
     if quotient_labels.len() <= 1 || quotient_pairs.len() != quotient_labels.len().saturating_mul(2)
     {
@@ -862,24 +807,12 @@ fn extract_parallel_p_bonds_from_quotient(
             dst: b,
             eid: vid,
         });
-        let can_atomize = atomize_p_bonds
-            && keyed_edges[pos..end_pos].iter().all(|item| {
-                let label = pre_p_labels[item.2];
-                spqra_core_child_ref(label as usize).is_some()
-                    || atomizable_virtuals.contains_key(&label)
-            });
         let comp = SplitComponent {
             edges: comp_edges,
             pole_a: a,
             pole_b: b,
-            origin: SPLIT_ORIGIN_PRETRICONN_P_BOND,
         };
-        if can_atomize {
-            atomizable_virtuals.insert(vid, ());
-            chain_atom_components.push(comp);
-        } else {
-            chain_components.push(comp);
-        }
+        chain_components.push(comp);
         quotient_pairs.push(a);
         quotient_pairs.push(b);
         quotient_labels.push(vid);
@@ -920,17 +853,11 @@ fn group_parallel_p_bonds_only_before_triconn(
     }
 
     let mut chain_components = Vec::new();
-    let mut chain_atom_components = Vec::new();
-    let mut atomizable_virtuals: HashMap<u32, ()> = HashMap::new();
-    let atomize_p_bonds = skip_assemble_spqr_requested();
     extract_parallel_p_bonds_from_quotient(
         &mut quotient_pairs,
         &mut quotient_labels,
         &mut chain_components,
-        &mut chain_atom_components,
-        &mut atomizable_virtuals,
         next_virtual,
-        atomize_p_bonds,
     );
 
     let mut node_remap = vec![u32::MAX; n];
@@ -954,7 +881,6 @@ fn group_parallel_p_bonds_only_before_triconn(
         quotient_node_inv,
         quotient_labels,
         chain_components,
-        chain_atom_components,
     }
 }
 
@@ -1291,7 +1217,6 @@ fn build_spqr_tree_filtered_impl(
     }
 
     let mut pretriconn_chain_comps: Vec<SplitComponent> = Vec::new();
-    let mut pretriconn_chain_atom_comps: Vec<SplitComponent> = Vec::new();
     let mut pretriconn_quotient_node_inv: Option<Vec<u32>> = None;
     let base_wg = owned_wg.as_ref().unwrap_or(graph);
     let labels = if relabel_edges {
@@ -1302,14 +1227,13 @@ fn build_spqr_tree_filtered_impl(
     let mut analysis_next_virtual = next_virtual;
     let analysis =
         group_parallel_p_bonds_only_before_triconn(base_wg, labels, &mut analysis_next_virtual);
-    if !analysis.chain_components.is_empty() || !analysis.chain_atom_components.is_empty() {
+    if !analysis.chain_components.is_empty() {
         owned_wg = Some(analysis.quotient);
         pretriconn_quotient_node_inv = Some(analysis.quotient_node_inv);
         weid_to_label = analysis.quotient_labels;
         relabel_edges = true;
         next_virtual = analysis_next_virtual;
         pretriconn_chain_comps = analysis.chain_components;
-        pretriconn_chain_atom_comps = analysis.chain_atom_components;
     }
 
     let wg = owned_wg.as_ref().unwrap_or(graph);
@@ -1350,7 +1274,6 @@ fn build_spqr_tree_filtered_impl(
                 edges,
                 pole_a: pa,
                 pole_b: pb,
-                origin: 0,
             }]
         }
     };
@@ -1402,7 +1325,7 @@ fn build_spqr_tree_filtered_impl(
     add_timing!(t_combine_us, t_combine);
 
     let t_merge = Instant::now();
-    let merged_component_types = Some(merge_same_type_components(&mut all, m));
+    merge_same_type_components(&mut all, m);
     if let Some(t) = timings.as_mut() {
         t.c_merged_components = all.len() as u64;
         t.c_virtual_id_span = next_virtual.saturating_sub(m as u32) as u64;
@@ -1422,52 +1345,8 @@ fn build_spqr_tree_filtered_impl(
     }
     add_timing!(t_merge_us, t_merge);
 
-    let mut preassembly_minimizer_sidecar =
-        if crate::sp_compress::integration::wants_spqra_minimizer_sidecar() {
-            let sidecar = std::sync::Arc::new(build_spqra_minimizer_sidecar_from_split_components(
-                graph,
-                &all,
-                &pretriconn_chain_atom_comps,
-                next_virtual,
-                merged_component_types.as_deref(),
-            ));
-            Some(sidecar)
-        } else {
-            None
-        };
-
-    let mut preassembly_scad_export = if crate::sp_compress::integration::wants_core_scad_export() {
-        export_core_scad_from_split_components(graph, &all, next_virtual).map(std::sync::Arc::new)
-    } else {
-        None
-    };
-
-    if skip_assemble_spqr_requested()
-        && (preassembly_scad_export.is_some() || preassembly_minimizer_sidecar.is_some())
-    {
-        if let Some(t) = timings.as_mut() {
-            if let Some(export) = preassembly_scad_export.as_ref() {
-                t.c_tree_nodes = export.components.len() as u64;
-                t.c_tree_edges = (export.incidences.len() / 2) as u64;
-                t.c_tree_skeleton_edges = export.edges.len() as u64;
-                t.c_tree_virtual_incidences = export.incidences.len() as u64;
-            } else if let Some(sidecar) = preassembly_minimizer_sidecar.as_ref() {
-                t.c_tree_nodes = sidecar.components.len() as u64;
-                t.c_tree_edges = sidecar.children.len() as u64;
-                t.c_tree_skeleton_edges = sidecar.edges.len() as u64;
-                t.c_tree_virtual_incidences = sidecar.children.len().saturating_mul(2) as u64;
-            }
-        }
-        let mut tree = SpqrTree::empty(m);
-        tree.preassembly_scad_export = preassembly_scad_export.take();
-        tree.preassembly_minimizer_sidecar = preassembly_minimizer_sidecar.take();
-        return tree;
-    }
-
     let t_assemble = Instant::now();
-    let mut tree = assemble_spqr_tree(graph, &all, next_virtual);
-    tree.preassembly_scad_export = preassembly_scad_export;
-    tree.preassembly_minimizer_sidecar = preassembly_minimizer_sidecar;
+    let tree = assemble_spqr_tree(graph, &all, next_virtual);
     if let Some(t) = timings.as_mut() {
         t.c_tree_nodes = tree.len() as u64;
         t.c_tree_edges = tree.children.len() as u64;
@@ -1480,609 +1359,6 @@ fn build_spqr_tree_filtered_impl(
     }
     add_timing!(t_assemble_us, t_assemble);
     tree
-}
-
-fn export_core_scad_from_split_components(
-    graph: &Graph,
-    components: &[SplitComponent],
-    next_virtual: u32,
-) -> Option<crate::sp_compress::integration::CoreScadExport> {
-    if components.is_empty() {
-        return Some(crate::sp_compress::integration::CoreScadExport {
-            components: Vec::new(),
-            edges: Vec::new(),
-            incidences: Vec::new(),
-            node_mapping: Vec::new(),
-        });
-    }
-
-    let m = graph.num_edges();
-    let base = m as u32;
-    let component_types = classify_components_parallel(components);
-    let total_edges = components.iter().map(|c| c.edges.len()).sum::<usize>();
-    let mut out_components: Vec<crate::sp_compress::integration::FfiScadComponent> =
-        Vec::with_capacity(components.len());
-    let mut out_edges: Vec<crate::sp_compress::integration::FfiScadEdge> =
-        Vec::with_capacity(total_edges);
-    let mut out_incidences: Vec<crate::sp_compress::integration::FfiScadIncidence> = Vec::new();
-    let mut out_node_mapping = Vec::new();
-    let mut incidence_first = vec![u32::MAX; next_virtual.saturating_sub(base) as usize];
-
-    let mut dense_seen = vec![0u32; graph.num_nodes()];
-    let mut dense_local = vec![0u32; graph.num_nodes()];
-    let mut dense_stamp = 1u32;
-
-    for (component_id, (comp, &nt)) in components.iter().zip(component_types.iter()).enumerate() {
-        let edge_begin = out_edges.len() as u32;
-        let node_begin = out_node_mapping.len() as u32;
-
-        let mut n2o: Vec<NodeId> = Vec::new();
-        let local_of = |v: u32,
-                        seen: &mut [u32],
-                        local: &mut [u32],
-                        stamp: u32,
-                        n2o: &mut Vec<NodeId>|
-         -> u32 {
-            let vi = v as usize;
-            if vi < seen.len() && seen[vi] == stamp {
-                local[vi]
-            } else {
-                let id = n2o.len() as u32;
-                if vi < seen.len() {
-                    seen[vi] = stamp;
-                    local[vi] = id;
-                }
-                n2o.push(NodeId(v));
-                id
-            }
-        };
-
-        local_of(
-            comp.pole_a,
-            &mut dense_seen,
-            &mut dense_local,
-            dense_stamp,
-            &mut n2o,
-        );
-        local_of(
-            comp.pole_b,
-            &mut dense_seen,
-            &mut dense_local,
-            dense_stamp,
-            &mut n2o,
-        );
-
-        for edge in &comp.edges {
-            let src_local = local_of(
-                edge.src,
-                &mut dense_seen,
-                &mut dense_local,
-                dense_stamp,
-                &mut n2o,
-            );
-            let dst_local = local_of(
-                edge.dst,
-                &mut dense_seen,
-                &mut dense_local,
-                dense_stamp,
-                &mut n2o,
-            );
-            let is_real = (edge.eid as usize) < m;
-            let local_edge_id = (out_edges.len() as u32).saturating_sub(edge_begin);
-            out_edges.push(crate::sp_compress::integration::FfiScadEdge {
-                kind: if is_real { 1 } else { 3 },
-                _pad: [0; 3],
-                src_local,
-                dst_local,
-                src_core: n2o.get(src_local as usize).map(|v| v.0).unwrap_or(INVALID),
-                dst_core: n2o.get(dst_local as usize).map(|v| v.0).unwrap_or(INVALID),
-                original_edge_id: if is_real { edge.eid } else { INVALID },
-                macro_id: INVALID,
-                virtual_id: if is_real { INVALID } else { edge.eid },
-            });
-
-            if !is_real {
-                let inc_idx = out_incidences.len() as u32;
-                let mut twin_incidence = u32::MAX;
-                if edge.eid >= base {
-                    let vid_idx = (edge.eid - base) as usize;
-                    if vid_idx < incidence_first.len() {
-                        let first = incidence_first[vid_idx];
-                        if first == u32::MAX {
-                            incidence_first[vid_idx] = inc_idx;
-                        } else {
-                            twin_incidence = first;
-                            out_incidences[first as usize].twin_incidence = inc_idx;
-                            incidence_first[vid_idx] = u32::MAX;
-                        }
-                    }
-                }
-                out_incidences.push(crate::sp_compress::integration::FfiScadIncidence {
-                    virtual_id: edge.eid,
-                    component_id: component_id as u32,
-                    local_edge_id,
-                    twin_incidence,
-                    sep_u: INVALID,
-                    sep_v: INVALID,
-                });
-            }
-        }
-
-        let edge_end = out_edges.len() as u32;
-        let inc_begin = 0u32;
-        let inc_end = out_incidences.len() as u32;
-        out_node_mapping.extend(n2o.iter().map(|v| v.0));
-        let node_end = out_node_mapping.len() as u32;
-        out_components.push(crate::sp_compress::integration::FfiScadComponent {
-            raw_component_id: component_id as u32,
-            kind: match nt {
-                SpqrNodeType::S => 1,
-                SpqrNodeType::P => 2,
-                SpqrNodeType::R => 3,
-            },
-            _pad: [0; 3],
-            edge_begin,
-            edge_end,
-            inc_begin,
-            inc_end,
-            node_begin,
-            node_end,
-        });
-
-        dense_stamp = dense_stamp.wrapping_add(1);
-        if dense_stamp == 0 {
-            dense_seen.fill(0);
-            dense_stamp = 1;
-        }
-    }
-
-    Some(crate::sp_compress::integration::CoreScadExport {
-        components: out_components,
-        edges: out_edges,
-        incidences: out_incidences,
-        node_mapping: out_node_mapping,
-    })
-}
-
-fn build_spqra_minimizer_sidecar_from_split_components(
-    graph: &Graph,
-    components_in: &[SplitComponent],
-    atom_components: &[SplitComponent],
-    next_virtual: u32,
-    component_types_hint: Option<&[SpqrNodeType]>,
-) -> crate::sp_compress::integration::SpqraMinimizerSidecar {
-    use crate::sp_compress::integration::{
-        FfiSpqraBehaviorAtom, FfiSpqraBehaviorAtomItem, FfiSpqraMinimizerComponent,
-        FfiSpqraMinimizerEdge, FfiSpqraMinimizerSummary, SpqraMinimizerSidecar,
-        SPQRA_MIN_ATOM_ITEM_BEHAVIOR_ATOM, SPQRA_MIN_ATOM_ITEM_CHILD_REF,
-        SPQRA_MIN_EDGE_HAS_BEHAVIOR_ATOM, SPQRA_MIN_EDGE_HAS_CHILD_REF, SPQRA_MIN_EDGE_VIRTUAL,
-    };
-
-    let n = components_in.len();
-    let root = if n == 0 { INVALID } else { 0 };
-    let m = graph.num_edges();
-    let base = m as u32;
-    let component_types: std::borrow::Cow<'_, [SpqrNodeType]> =
-        if let Some(types) = component_types_hint {
-            if types.len() == n {
-                std::borrow::Cow::Borrowed(types)
-            } else {
-                std::borrow::Cow::Owned(classify_components_parallel(components_in))
-            }
-        } else {
-            std::borrow::Cow::Owned(classify_components_parallel(components_in))
-        };
-    let total_edges = components_in.iter().map(|c| c.edges.len()).sum::<usize>();
-
-    let mut components = Vec::with_capacity(n);
-    let mut edges: Vec<FfiSpqraMinimizerEdge> = Vec::with_capacity(total_edges);
-    let mut behavior_atoms: Vec<FfiSpqraBehaviorAtom> =
-        Vec::with_capacity(atom_components.len().saturating_add(n));
-    let mut behavior_atom_items: Vec<FfiSpqraBehaviorAtomItem> =
-        Vec::with_capacity(total_edges.saturating_mul(2));
-    let mut node_mapping = Vec::new();
-    let mut tree_pairs: Vec<(u32, u32)> = Vec::new();
-    let mut virtual_first =
-        vec![(INVALID, INVALID, INVALID); next_virtual.saturating_sub(base) as usize];
-    let mut atom_by_virtual = vec![INVALID; next_virtual.saturating_sub(base) as usize];
-    let mut attachment_by_virtual = vec![false; next_virtual.saturating_sub(base) as usize];
-    let mut rap_r_leaf_folded = vec![false; n];
-    for atom_comp in atom_components {
-        let atom_vid = atom_comp.edges.last().map(|e| e.eid).unwrap_or(INVALID);
-        if atom_vid < base {
-            continue;
-        }
-        let atom_idx = behavior_atoms.len() as u32;
-        let item_begin = behavior_atom_items.len() as u32;
-        for e in atom_comp
-            .edges
-            .iter()
-            .take(atom_comp.edges.len().saturating_sub(1))
-        {
-            if let Some(child_ref) = spqra_core_child_ref(e.eid as usize) {
-                behavior_atom_items.push(FfiSpqraBehaviorAtomItem {
-                    child_ref,
-                    flags: SPQRA_MIN_ATOM_ITEM_CHILD_REF,
-                    src_core: e.src,
-                    dst_core: e.dst,
-                });
-            } else if e.eid >= base {
-                let vidx = (e.eid - base) as usize;
-                let atom_ref = atom_by_virtual.get(vidx).copied().unwrap_or(INVALID);
-                if atom_ref != INVALID {
-                    behavior_atom_items.push(FfiSpqraBehaviorAtomItem {
-                        child_ref: atom_ref.into(),
-                        flags: SPQRA_MIN_ATOM_ITEM_BEHAVIOR_ATOM,
-                        src_core: e.src,
-                        dst_core: e.dst,
-                    });
-                }
-            }
-        }
-        let item_end = behavior_atom_items.len() as u32;
-        if item_end == item_begin {
-            continue;
-        }
-        let atom_kind = if (atom_comp.origin & SPLIT_ORIGIN_PRETRICONN_P_BOND) != 0 {
-            2
-        } else {
-            1
-        };
-        behavior_atoms.push(FfiSpqraBehaviorAtom {
-            kind: atom_kind,
-            _pad: [atom_comp.origin, 0, 0],
-            item_begin,
-            item_end,
-            port0_core: atom_comp.pole_a,
-            port1_core: atom_comp.pole_b,
-        });
-        let vidx = (atom_vid - base) as usize;
-        if vidx < atom_by_virtual.len() {
-            atom_by_virtual[vidx] = atom_idx;
-        }
-    }
-    for (component_id, (comp, &nt)) in components_in.iter().zip(component_types.iter()).enumerate()
-    {
-        if nt != SpqrNodeType::R {
-            continue;
-        }
-        let mut boundary_vid = INVALID;
-        let mut topology_virtuals = 0u32;
-        let mut item_count = 0u32;
-        let mut foldable = true;
-        for e in &comp.edges {
-            if (e.eid as usize) < m {
-                if spqra_core_child_ref(e.eid as usize).is_some() {
-                    item_count = item_count.saturating_add(1);
-                } else {
-                    foldable = false;
-                    break;
-                }
-            } else if e.eid >= base {
-                let vidx = (e.eid - base) as usize;
-                let atom_ref = atom_by_virtual.get(vidx).copied().unwrap_or(INVALID);
-                if atom_ref != INVALID {
-                    item_count = item_count.saturating_add(1);
-                } else {
-                    topology_virtuals = topology_virtuals.saturating_add(1);
-                    boundary_vid = e.eid;
-                }
-            } else {
-                foldable = false;
-                break;
-            }
-        }
-        if foldable
-            && topology_virtuals == 1
-            && boundary_vid >= base
-            && ((boundary_vid - base) as usize) < atom_by_virtual.len()
-            && item_count > 0
-        {
-            attachment_by_virtual[(boundary_vid - base) as usize] = true;
-            rap_r_leaf_folded[component_id] = true;
-        }
-    }
-    let mut component_sidecar_id = vec![INVALID; n];
-    let mut sidecar_component_count = 0u32;
-    for cid in 0..n {
-        if rap_r_leaf_folded.get(cid).copied().unwrap_or(false) {
-            continue;
-        }
-        component_sidecar_id[cid] = sidecar_component_count;
-        sidecar_component_count = sidecar_component_count.saturating_add(1);
-    }
-    let mut summary = FfiSpqraMinimizerSummary {
-        root: component_sidecar_id
-            .get(root as usize)
-            .copied()
-            .filter(|&r| r != INVALID)
-            .unwrap_or(0),
-        ..FfiSpqraMinimizerSummary::default()
-    };
-
-    let mut dense_seen = vec![0u32; graph.num_nodes()];
-    let mut dense_local = vec![0u32; graph.num_nodes()];
-    let mut dense_stamp = 1u32;
-    let mut virtual_inc_count = 0u32;
-
-    for (component_id, (comp, &nt)) in components_in.iter().zip(component_types.iter()).enumerate()
-    {
-        let sidecar_component_id = component_sidecar_id
-            .get(component_id)
-            .copied()
-            .unwrap_or(INVALID);
-        let edge_begin = edges.len() as u32;
-        let node_begin = node_mapping.len() as u32;
-        if sidecar_component_id == INVALID {
-            continue;
-        }
-
-        let mut n2o: Vec<NodeId> = Vec::new();
-        let local_of = |v: u32,
-                        seen: &mut [u32],
-                        local: &mut [u32],
-                        stamp: u32,
-                        n2o: &mut Vec<NodeId>|
-         -> u32 {
-            let vi = v as usize;
-            if vi < seen.len() && seen[vi] == stamp {
-                local[vi]
-            } else {
-                let id = n2o.len() as u32;
-                if vi < seen.len() {
-                    seen[vi] = stamp;
-                    local[vi] = id;
-                }
-                n2o.push(NodeId(v));
-                id
-            }
-        };
-
-        local_of(
-            comp.pole_a,
-            &mut dense_seen,
-            &mut dense_local,
-            dense_stamp,
-            &mut n2o,
-        );
-        local_of(
-            comp.pole_b,
-            &mut dense_seen,
-            &mut dense_local,
-            dense_stamp,
-            &mut n2o,
-        );
-
-        let kind = match nt {
-            SpqrNodeType::S => 1,
-            SpqrNodeType::P => 2,
-            SpqrNodeType::R => 3,
-        };
-
-        for edge in &comp.edges {
-            let src_local = local_of(
-                edge.src,
-                &mut dense_seen,
-                &mut dense_local,
-                dense_stamp,
-                &mut n2o,
-            );
-            let dst_local = local_of(
-                edge.dst,
-                &mut dense_seen,
-                &mut dense_local,
-                dense_stamp,
-                &mut n2o,
-            );
-            let local_edge_id = (edges.len() as u32).saturating_sub(edge_begin);
-            let global_edge_id = edges.len() as u32;
-            let is_real = (edge.eid as usize) < m;
-            let mut min_edge = FfiSpqraMinimizerEdge {
-                src_local,
-                dst_local,
-                flags: if is_real { 0 } else { SPQRA_MIN_EDGE_VIRTUAL },
-                ..FfiSpqraMinimizerEdge::default()
-            };
-
-            if is_real {
-                if let Some(child_ref) = spqra_core_child_ref(edge.eid as usize) {
-                    min_edge.child_ref = child_ref;
-                    min_edge.flags |= SPQRA_MIN_EDGE_HAS_CHILD_REF;
-                }
-            } else if edge.eid >= base {
-                let vidx = (edge.eid - base) as usize;
-                let has_attachment = attachment_by_virtual.get(vidx).copied().unwrap_or(false);
-                if has_attachment {
-                    min_edge.flags = 0;
-                } else {
-                    let atom_idx = atom_by_virtual.get(vidx).copied().unwrap_or(INVALID);
-                    if atom_idx != INVALID {
-                        min_edge.flags = SPQRA_MIN_EDGE_HAS_BEHAVIOR_ATOM;
-                        min_edge.child_ref = atom_idx.into();
-                    } else {
-                        virtual_inc_count = virtual_inc_count.saturating_add(1);
-                        if vidx < virtual_first.len() {
-                            let (first_component, first_local, first_global) = virtual_first[vidx];
-                            if first_component == INVALID {
-                                virtual_first[vidx] =
-                                    (sidecar_component_id, local_edge_id, global_edge_id);
-                            } else {
-                                min_edge.twin_component = first_component;
-                                min_edge.twin_local_edge = first_local;
-                                if let Some(first_edge) = edges.get_mut(first_global as usize) {
-                                    first_edge.twin_component = sidecar_component_id;
-                                    first_edge.twin_local_edge = local_edge_id;
-                                    if first_component == sidecar_component_id {
-                                        summary.bad_twin_count =
-                                            summary.bad_twin_count.saturating_add(1);
-                                    } else {
-                                        tree_pairs.push((first_component, sidecar_component_id));
-                                    }
-                                } else {
-                                    summary.bad_twin_count =
-                                        summary.bad_twin_count.saturating_add(1);
-                                }
-                                virtual_first[vidx] = (INVALID, INVALID, INVALID);
-                            }
-                        } else {
-                            summary.bad_twin_count = summary.bad_twin_count.saturating_add(1);
-                        }
-                    }
-                }
-            } else {
-                summary.bad_twin_count = summary.bad_twin_count.saturating_add(1);
-            }
-            edges.push(min_edge);
-        }
-
-        node_mapping.extend(n2o.iter().map(|v| v.0));
-        let node_end = node_mapping.len() as u32;
-        let edge_end = edges.len() as u32;
-        components.push(FfiSpqraMinimizerComponent {
-            kind,
-            _pad: [comp.origin, 0, 0],
-            raw_component_id: sidecar_component_id,
-            parent: INVALID,
-            child_begin: 0,
-            child_end: 0,
-            edge_begin,
-            edge_end,
-            inc_begin: 0,
-            inc_end: 0,
-            node_begin,
-            node_end,
-            port0_core: INVALID,
-            port1_core: INVALID,
-        });
-
-        dense_stamp = dense_stamp.wrapping_add(1);
-        if dense_stamp == 0 {
-            dense_seen.fill(0);
-            dense_stamp = 1;
-        }
-    }
-    for &(component_id, _, _) in &virtual_first {
-        if component_id != INVALID {
-            summary.bad_twin_count = summary.bad_twin_count.saturating_add(1);
-        }
-    }
-    let active_n = components.len();
-
-    let mut parents = vec![INVALID; active_n];
-    let children = if active_n == 0 {
-        Vec::new()
-    } else {
-        let mut adj_count = vec![0u32; active_n];
-        for &(a, b) in &tree_pairs {
-            let ai = a as usize;
-            let bi = b as usize;
-            if ai < active_n && bi < active_n {
-                adj_count[ai] = adj_count[ai].saturating_add(1);
-                adj_count[bi] = adj_count[bi].saturating_add(1);
-            }
-        }
-        let mut adj_offsets = vec![0u32; active_n + 1];
-        for i in 0..active_n {
-            adj_offsets[i + 1] = adj_offsets[i].saturating_add(adj_count[i]);
-        }
-        let mut adj = vec![INVALID; adj_offsets[active_n] as usize];
-        let mut write = adj_offsets[..active_n].to_vec();
-        for &(a, b) in &tree_pairs {
-            let ai = a as usize;
-            let bi = b as usize;
-            if ai < active_n && bi < active_n {
-                adj[write[ai] as usize] = b;
-                write[ai] = write[ai].saturating_add(1);
-                adj[write[bi] as usize] = a;
-                write[bi] = write[bi].saturating_add(1);
-            }
-        }
-
-        let mut seen = vec![false; active_n];
-        let mut stack = vec![0u32];
-        if !seen.is_empty() {
-            seen[0] = true;
-        }
-        while let Some(v) = stack.pop() {
-            let vi = v as usize;
-            for ai in adj_offsets[vi] as usize..adj_offsets[vi + 1] as usize {
-                let u = adj[ai];
-                if u == INVALID {
-                    continue;
-                }
-                let ui = u as usize;
-                if ui >= n || seen[ui] {
-                    continue;
-                }
-                seen[ui] = true;
-                parents[ui] = v;
-                stack.push(u);
-            }
-        }
-        for i in 1..active_n {
-            if !seen[i] {
-                parents[i] = 0;
-            }
-        }
-
-        let mut child_count = vec![0u32; active_n];
-        for &p in &parents {
-            if p != INVALID && (p as usize) < active_n {
-                child_count[p as usize] = child_count[p as usize].saturating_add(1);
-            }
-        }
-        let mut child_offsets = vec![0u32; active_n + 1];
-        for i in 0..active_n {
-            child_offsets[i + 1] = child_offsets[i].saturating_add(child_count[i]);
-        }
-        let mut children = vec![INVALID; child_offsets[active_n] as usize];
-        write = child_offsets[..active_n].to_vec();
-        for (child, &p) in parents.iter().enumerate() {
-            if p != INVALID && (p as usize) < active_n {
-                children[write[p as usize] as usize] = child as u32;
-                write[p as usize] = write[p as usize].saturating_add(1);
-            }
-        }
-        for i in 0..active_n {
-            components[i].parent = parents[i];
-            components[i].child_begin = child_offsets[i];
-            components[i].child_end = child_offsets[i + 1];
-        }
-        children
-    };
-
-    let mut postorder = Vec::with_capacity(active_n);
-    if active_n > 0 {
-        let mut entered = vec![false; active_n];
-        let mut stack = vec![0u32];
-        while let Some(&tn) = stack.last() {
-            let ti = tn as usize;
-            if ti >= active_n {
-                stack.pop();
-                continue;
-            }
-            if !entered[ti] {
-                entered[ti] = true;
-                for ci in components[ti].child_begin as usize..components[ti].child_end as usize {
-                    stack.push(children[ci]);
-                }
-            } else {
-                stack.pop();
-                postorder.push(tn);
-            }
-        }
-    }
-
-    SpqraMinimizerSidecar {
-        components,
-        edges,
-        behavior_atoms,
-        behavior_atom_items,
-        node_mapping,
-        children,
-        postorder,
-        summary,
-    }
 }
 
 fn build_parallel_case(graph: &Graph, self_loops: SelfLoopFlags<'_>) -> SpqrTree {
@@ -2131,8 +1407,6 @@ fn build_parallel_case(graph: &Graph, self_loops: SelfLoopFlags<'_>) -> SpqrTree
         skeleton_num_nodes: vec![2],
         edge_to_tree_node,
         min_real_per_node: vec![min_real],
-        preassembly_scad_export: None,
-        preassembly_minimizer_sidecar: None,
     }
 }
 
@@ -2283,7 +1557,6 @@ fn split_multi_edges(
             edges,
             pole_a: a,
             pole_b: b,
-            origin: 0,
         });
         synthetic.push((a, b, vid));
     }
@@ -2991,7 +2264,6 @@ fn triconn_decompose(
                             ],
                             pole_a: v,
                             pole_b: x,
-                            origin: 0,
                         });
                         if let Some(&et) = estack.last() {
                             if me_src[et as usize] == x && me_dst[et as usize] == v {
@@ -3023,7 +2295,6 @@ fn triconn_decompose(
                                 ],
                                 pole_a: v,
                                 pole_b: x,
-                                origin: 0,
                             });
                             degree[x as usize] -= 1;
                             degree[v as usize] -= 1;
@@ -3078,7 +2349,6 @@ fn triconn_decompose(
                             edges: ce,
                             pole_a: pa,
                             pole_b: pb,
-                            origin: 0,
                         });
                         let x = pb;
                         let mut cur_virt = ev;
@@ -3103,7 +2373,6 @@ fn triconn_decompose(
                                 ],
                                 pole_a: v,
                                 pole_b: x,
-                                origin: 0,
                             });
                             degree[x as usize] -= 1;
                             degree[v as usize] -= 1;
@@ -3158,7 +2427,6 @@ fn triconn_decompose(
                     edges: ce,
                     pole_a: v,
                     pole_b: pl,
-                    origin: 0,
                 });
 
                 if (xx == vn && yy == l1) || (yy == vn && xx == l1) {
@@ -3185,7 +2453,6 @@ fn triconn_decompose(
                             ],
                             pole_a: v,
                             pole_b: pl,
-                            origin: 0,
                         });
                         me_hi_slot[nv2 as usize] = me_hi_slot[eh as usize];
                         degree[v as usize] -= 1;
@@ -3235,7 +2502,6 @@ fn triconn_decompose(
                         ],
                         pole_a: pl,
                         pole_b: v,
-                        origin: 0,
                     });
                     tree_arc[v as usize] = nv2;
                     me_etype[nv2 as usize] = 1;
@@ -3308,7 +2574,6 @@ fn triconn_decompose(
             edges: rem,
             pole_a: pa,
             pole_b: pb,
-            origin: 0,
         });
     }
 
@@ -3511,7 +2776,6 @@ fn split_internal_parallels(comp: SplitComponent, next_virtual: &mut u32) -> Vec
                 edges: bond_edges,
                 pole_a: a,
                 pole_b: b,
-                origin: comp.origin,
             });
             remainder_edges.push(StackEdge {
                 src: a,
@@ -3526,7 +2790,6 @@ fn split_internal_parallels(comp: SplitComponent, next_virtual: &mut u32) -> Vec
         edges: remainder_edges,
         pole_a: comp.pole_a,
         pole_b: comp.pole_b,
-        origin: comp.origin,
     });
     result
 }
@@ -3680,7 +2943,6 @@ fn merge_same_type_components(comps: &mut Vec<SplitComponent>, m: usize) -> Vec<
             }
 
             visited[j] = true;
-            comps[i].origin |= comps[j].origin;
 
             let mut j_edges = std::mem::take(&mut comps[j].edges);
             j_edges.retain(|e| e.eid != eid);
