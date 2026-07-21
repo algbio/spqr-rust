@@ -16,6 +16,10 @@ pub static CANONICALIZE_ROOT_ENABLED: AtomicBool = AtomicBool::new(true);
 
 static SPQR_THREAD_COUNT: OnceLock<usize> = OnceLock::new();
 
+pub fn set_spqr_thread_count(threads: usize) -> bool {
+    SPQR_THREAD_COUNT.set(threads.max(1)).is_ok()
+}
+
 pub(crate) fn spqr_thread_count() -> usize {
     *SPQR_THREAD_COUNT.get_or_init(|| {
         let from_env = |name: &str| -> Option<usize> {
