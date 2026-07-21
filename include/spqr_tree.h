@@ -27,8 +27,11 @@ typedef struct SpqrBCTreeFFI SpqrBCTreeFFI;
 typedef struct SpqrResult SpqrResult;
 typedef struct SpqrTree SpqrTree;
 typedef struct SpqrGraphFFI64 SpqrGraphFFI64;
+typedef struct SpqrWideBCTreeFFI SpqrWideBCTreeFFI;
 typedef struct SpqrResult64 SpqrResult64;
 typedef struct SpqrTree64 SpqrTree64;
+typedef struct SpqrPayloadResult64 SpqrPayloadResult64;
+typedef struct SpqrPayloadTree64 SpqrPayloadTree64;
 
 typedef struct SkeletonEdge {
 	uint32_t src;
@@ -48,6 +51,38 @@ typedef struct SkeletonEdge64 {
 	uint64_t twin_edge_idx;
 } SkeletonEdge64;
 
+typedef struct SpqrPayloadTreeColumns64 {
+	uint64_t root;
+	uint64_t tree_nodes;
+	uint64_t children;
+	uint64_t skeleton_edges;
+	uint64_t node_mapping;
+	const uint8_t* node_types;
+	const uint64_t* node_parents;
+	const uint64_t* children_offsets;
+	const uint64_t* child_nodes;
+	const uint64_t* skeleton_offsets;
+	const uint64_t* node_mapping_offsets;
+	const uint64_t* node_mapping_values;
+	const uint64_t* skeleton_num_nodes;
+} SpqrPayloadTreeColumns64;
+
+typedef struct SpqrPackedU40Column64 {
+	const uint32_t* low;
+	const uint8_t* high;
+	uint64_t count;
+} SpqrPackedU40Column64;
+
+typedef struct SpqrPackedSkeleton64 {
+	const uint64_t* edge_words;
+	uint64_t edge_count;
+	uint64_t first_virtual;
+	SpqrPackedU40Column64 first_tree;
+	SpqrPackedU40Column64 first_edge;
+	SpqrPackedU40Column64 second_tree;
+	SpqrPackedU40Column64 second_edge;
+} SpqrPackedSkeleton64;
+
 typedef struct SkeletonEdgeInfo {
 	uint32_t src;
 	uint32_t dst;
@@ -66,6 +101,20 @@ typedef struct SkeletonEdgeInfo64 {
 
 
 SpqrGraphFFI64* spqr_graph_new_u64(uint64_t node_capacity, uint64_t edge_capacity);
+SpqrGraphFFI64* spqr_graph_new_edge_storage_u64(uint64_t num_nodes, uint64_t num_edges);
+SpqrGraphFFI64* spqr_graph_new_packed_edge_storage_u40(uint64_t num_nodes,
+                                                       uint64_t num_edges);
+SpqrGraphFFI64* spqr_graph_new_split_packed_edge_storage_u40(uint64_t num_nodes,
+                                                             uint64_t num_edges);
+uint64_t* spqr_graph_edge_storage_mut_u64(SpqrGraphFFI64* graph);
+uint32_t* spqr_graph_packed_edge_storage_low_mut_u40(SpqrGraphFFI64* graph);
+uint8_t* spqr_graph_packed_edge_storage_high_mut_u40(SpqrGraphFFI64* graph);
+uint32_t* spqr_graph_split_packed_edge_storage_source_low_mut_u40(SpqrGraphFFI64* graph);
+uint8_t* spqr_graph_split_packed_edge_storage_source_high_mut_u40(SpqrGraphFFI64* graph);
+bool spqr_graph_allocate_split_packed_edge_storage_target_u40(SpqrGraphFFI64* graph);
+uint32_t* spqr_graph_split_packed_edge_storage_target_low_mut_u40(SpqrGraphFFI64* graph);
+uint8_t* spqr_graph_split_packed_edge_storage_target_high_mut_u40(SpqrGraphFFI64* graph);
+bool spqr_graph_finalize_edge_storage_u64(SpqrGraphFFI64* graph);
 void spqr_graph_free_u64(SpqrGraphFFI64* graph);
 uint64_t spqr_graph_add_nodes_u64(SpqrGraphFFI64* graph, uint64_t count);
 uint64_t spqr_graph_add_edge_u64(SpqrGraphFFI64* graph, uint64_t u, uint64_t v);
@@ -73,8 +122,19 @@ SpqrGraphFFI64* spqr_graph_from_arrays_u64(uint64_t num_nodes,
                                            const uint64_t* src,
                                            const uint64_t* dst,
                                            uint64_t num_edges);
+void spqr_graph_release_adjacency_u64(SpqrGraphFFI64* graph);
 uint64_t spqr_graph_num_nodes_u64(const SpqrGraphFFI64* graph);
 uint64_t spqr_graph_num_edges_u64(const SpqrGraphFFI64* graph);
+bool spqr_graph_copy_edges_u64(const SpqrGraphFFI64* graph,
+                               uint64_t first_edge,
+                               uint64_t* sources,
+                               uint64_t* targets,
+                               uint64_t count);
+bool spqr_graph_packed_half_edges_u40(const SpqrGraphFFI64* graph,
+                                      SpqrPackedU40Column64* out);
+bool spqr_graph_split_packed_edges_u40(const SpqrGraphFFI64* graph,
+                                       SpqrPackedU40Column64* source,
+                                       SpqrPackedU40Column64* target);
 uint64_t spqr_graph_edge_src_u64(const SpqrGraphFFI64* graph, uint64_t edge_id);
 uint64_t spqr_graph_edge_dst_u64(const SpqrGraphFFI64* graph, uint64_t edge_id);
 uint64_t spqr_graph_degree_u64(const SpqrGraphFFI64* graph, uint64_t node);
@@ -174,6 +234,7 @@ uint64_t spqr_get_fast_cycle_calls(void);
 void spqr_set_canonicalize_root_enabled(uint8_t enabled);
 uint8_t spqr_get_canonicalize_root_enabled(void);
 
+bool spqr_set_thread_count(uint32_t threads);
 // returns ID of first added node
 uint32_t spqr_graph_add_nodes(SpqrGraphFFI* graph, uint32_t count);
 uint32_t spqr_graph_add_edge(SpqrGraphFFI* graph, uint32_t u, uint32_t v);
