@@ -46,12 +46,14 @@ pub mod sp_compress;
 pub mod spqr_format;
 pub mod verify;
 pub mod wide;
+pub mod wide_biconnected;
 
 pub use biconnected::{BCNodeId, BCNodeType, BCTree, Block};
 pub use connected::{
     connected_components, connected_components_simple, count_connected_components,
     ConnectedComponents,
 };
+pub use wide_biconnected::{WideBCTree, WideBCTreeError, WideBlock, WideCsrGraph};
 
 use std::collections::HashMap;
 use std::fmt;
