@@ -155,6 +155,78 @@ uint64_t spqr_graph_neighbors_to_buffer_u64(const SpqrGraphFFI64* graph,
                                             uint64_t* edges_out,
                                             uint64_t buffer_size);
 
+// Wide BC tree. Node IDs are dense in [0, num_nodes); edge IDs are input positions.
+// Call get_sizes first, then allocate block_count + 1 offsets and the flat arrays.
+SpqrWideBCTreeFFI* spqr_wide_bc_tree_from_arrays_u64(uint64_t num_nodes,
+                                                      const uint64_t* src,
+                                                      const uint64_t* dst,
+                                                      uint64_t num_edges);
+SpqrWideBCTreeFFI* spqr_wide_bc_tree_from_arrays_ordered_u64(uint64_t num_nodes,
+                                                              const uint64_t* src,
+                                                              const uint64_t* dst,
+                                                              uint64_t num_edges);
+SpqrWideBCTreeFFI* spqr_wide_bc_tree_from_arrays_cyclic_u64(uint64_t num_nodes,
+                                                             const uint64_t* src,
+                                                             const uint64_t* dst,
+                                                             uint64_t num_edges);
+SpqrWideBCTreeFFI* spqr_wide_bc_tree_from_packed_arrays_u40(uint64_t num_nodes,
+                                                            const uint32_t* src_low,
+                                                            const uint8_t* src_high,
+                                                            const uint32_t* dst_low,
+                                                            const uint8_t* dst_high,
+                                                            uint64_t num_edges);
+SpqrWideBCTreeFFI* spqr_wide_bc_tree_from_packed_arrays_ordered_u40(
+    uint64_t num_nodes,
+    const uint32_t* src_low,
+    const uint8_t* src_high,
+    const uint32_t* dst_low,
+    const uint8_t* dst_high,
+    uint64_t num_edges);
+SpqrWideBCTreeFFI* spqr_wide_bc_tree_from_packed_arrays_compact_u40(
+    uint64_t num_nodes,
+    const uint32_t* src_low,
+    const uint8_t* src_high,
+    const uint32_t* dst_low,
+    const uint8_t* dst_high,
+    uint64_t num_edges);
+SpqrWideBCTreeFFI* spqr_wide_bc_tree_from_packed_arrays_cyclic_compact_u40(
+    uint64_t num_nodes,
+    const uint32_t* src_low,
+    const uint8_t* src_high,
+    const uint32_t* dst_low,
+    const uint8_t* dst_high,
+    uint64_t num_edges);
+void spqr_wide_bc_tree_free_u64(SpqrWideBCTreeFFI* tree);
+void spqr_wide_bc_tree_get_sizes_u64(const SpqrWideBCTreeFFI* tree,
+                                     uint64_t* out_num_components,
+                                     uint64_t* out_num_blocks,
+                                     uint64_t* out_total_nodes,
+                                     uint64_t* out_total_edges,
+                                     uint64_t* out_num_cut_vertices);
+uint64_t spqr_wide_bc_tree_identity_node_prefix_u64(const SpqrWideBCTreeFFI* tree);
+uint64_t spqr_wide_bc_tree_identity_edge_prefix_u64(const SpqrWideBCTreeFFI* tree);
+bool spqr_wide_bc_tree_is_biconnected_u64(const SpqrWideBCTreeFFI* tree);
+bool spqr_wide_bc_tree_is_cut_vertex_u64(const SpqrWideBCTreeFFI* tree, uint64_t node);
+bool spqr_wide_bc_tree_bulk_export_u64(const SpqrWideBCTreeFFI* tree,
+                                       uint64_t* block_node_offsets,
+                                       uint64_t* block_nodes,
+                                       uint64_t* block_edge_offsets,
+                                       uint64_t* block_edges,
+                                       uint64_t* cut_vertices);
+const uint64_t* spqr_wide_bc_tree_nodes_u64(const SpqrWideBCTreeFFI* tree,
+                                            uint64_t* out_len);
+const uint64_t* spqr_wide_bc_tree_edges_u64(const SpqrWideBCTreeFFI* tree,
+                                            uint64_t* out_len);
+bool spqr_wide_bc_tree_nodes_u40(const SpqrWideBCTreeFFI* tree,
+                                 const uint32_t** out_low,
+                                 const uint8_t** out_high,
+                                 uint64_t* out_len);
+bool spqr_wide_bc_tree_edges_u40(const SpqrWideBCTreeFFI* tree,
+                                 const uint32_t** out_low,
+                                 const uint8_t** out_high,
+                                 uint64_t* out_len);
+const uint64_t* spqr_wide_bc_tree_cut_vertices_u64(const SpqrWideBCTreeFFI* tree,
+                                                   uint64_t* out_len);
 SpqrResult64* spqr_build_u64(const SpqrGraphFFI64* graph);
 void spqr_result_free_u64(SpqrResult64* result);
 const SpqrTree64* spqr_result_tree_u64(const SpqrResult64* result);
@@ -234,7 +306,6 @@ uint64_t spqr_get_fast_cycle_calls(void);
 void spqr_set_canonicalize_root_enabled(uint8_t enabled);
 uint8_t spqr_get_canonicalize_root_enabled(void);
 
-bool spqr_set_thread_count(uint32_t threads);
 // returns ID of first added node
 uint32_t spqr_graph_add_nodes(SpqrGraphFFI* graph, uint32_t count);
 uint32_t spqr_graph_add_edge(SpqrGraphFFI* graph, uint32_t u, uint32_t v);

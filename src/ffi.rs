@@ -739,6 +739,387 @@ pub unsafe extern "C" fn spqr_graph_neighbors_to_buffer_u64(
     count as u64
 }
 
+unsafe fn wide_bc_tree_from_arrays_u64(
+    num_nodes: u64,
+    src: *const u64,
+    dst: *const u64,
+    num_edges: u64,
+    ordered: bool,
+    cyclic: bool,
+) -> *mut WideBCTreeFFI {
+    let Some(num_edges) = ffi_u64_to_usize(num_edges) else {
+        return ptr::null_mut();
+    };
+    if num_edges > 0 && (src.is_null() || dst.is_null()) {
+        return ptr::null_mut();
+    }
+    let empty: &[u64] = &[];
+    let (src, dst) = if num_edges == 0 {
+        (empty, empty)
+    } else {
+        (
+            slice::from_raw_parts(src, num_edges),
+            slice::from_raw_parts(dst, num_edges),
+        )
+    };
+    let inner = match catch_unwind(AssertUnwindSafe(|| {
+        if cyclic {
+            WideBCTree::from_edge_arrays_cyclic(num_nodes, src, dst)
+        } else if ordered {
+            WideBCTree::from_edge_arrays_ordered(num_nodes, src, dst)
+        } else {
+            WideBCTree::from_edge_arrays(num_nodes, src, dst)
+        }
+    })) {
+        Ok(Ok(inner)) => inner,
+        _ => return ptr::null_mut(),
+    };
+    Box::into_raw(Box::new(WideBCTreeFFI { inner }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_from_arrays_u64(
+    num_nodes: u64,
+    src: *const u64,
+    dst: *const u64,
+    num_edges: u64,
+) -> *mut WideBCTreeFFI {
+    wide_bc_tree_from_arrays_u64(num_nodes, src, dst, num_edges, false, false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_from_arrays_ordered_u64(
+    num_nodes: u64,
+    src: *const u64,
+    dst: *const u64,
+    num_edges: u64,
+) -> *mut WideBCTreeFFI {
+    wide_bc_tree_from_arrays_u64(num_nodes, src, dst, num_edges, true, false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_from_arrays_cyclic_u64(
+    num_nodes: u64,
+    src: *const u64,
+    dst: *const u64,
+    num_edges: u64,
+) -> *mut WideBCTreeFFI {
+    wide_bc_tree_from_arrays_u64(num_nodes, src, dst, num_edges, false, true)
+}
+
+unsafe fn wide_bc_tree_from_packed_arrays_u40(
+    num_nodes: u64,
+    src_low: *const u32,
+    src_high: *const u8,
+    dst_low: *const u32,
+    dst_high: *const u8,
+    num_edges: u64,
+    compact: bool,
+    ordered: bool,
+    cyclic: bool,
+) -> *mut WideBCTreeFFI {
+    let Some(num_edges) = ffi_u64_to_usize(num_edges) else {
+        return ptr::null_mut();
+    };
+    if num_edges > 0
+        && (src_low.is_null() || src_high.is_null() || dst_low.is_null() || dst_high.is_null())
+    {
+        return ptr::null_mut();
+    }
+    let empty_u32: &[u32] = &[];
+    let empty_u8: &[u8] = &[];
+    let (src_low, src_high, dst_low, dst_high) = if num_edges == 0 {
+        (empty_u32, empty_u8, empty_u32, empty_u8)
+    } else {
+        (
+            slice::from_raw_parts(src_low, num_edges),
+            slice::from_raw_parts(src_high, num_edges),
+            slice::from_raw_parts(dst_low, num_edges),
+            slice::from_raw_parts(dst_high, num_edges),
+        )
+    };
+    let inner = match catch_unwind(AssertUnwindSafe(|| {
+        if cyclic {
+            WideBCTree::from_packed_edge_arrays_cyclic_compact(
+                num_nodes,
+                src_low,
+                src_high,
+                dst_low,
+                dst_high,
+                crate::spqr_thread_count(),
+            )
+        } else if ordered {
+            WideBCTree::from_packed_edge_arrays_ordered(
+                num_nodes,
+                src_low,
+                src_high,
+                dst_low,
+                dst_high,
+                crate::spqr_thread_count(),
+            )
+        } else if compact {
+            WideBCTree::from_packed_edge_arrays_compact(
+                num_nodes,
+                src_low,
+                src_high,
+                dst_low,
+                dst_high,
+                crate::spqr_thread_count(),
+            )
+        } else {
+            WideBCTree::from_packed_edge_arrays(
+                num_nodes,
+                src_low,
+                src_high,
+                dst_low,
+                dst_high,
+                crate::spqr_thread_count(),
+            )
+        }
+    })) {
+        Ok(Ok(inner)) => inner,
+        _ => return ptr::null_mut(),
+    };
+    Box::into_raw(Box::new(WideBCTreeFFI { inner }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_from_packed_arrays_u40(
+    num_nodes: u64,
+    src_low: *const u32,
+    src_high: *const u8,
+    dst_low: *const u32,
+    dst_high: *const u8,
+    num_edges: u64,
+) -> *mut WideBCTreeFFI {
+    wide_bc_tree_from_packed_arrays_u40(
+        num_nodes, src_low, src_high, dst_low, dst_high, num_edges, false, false, false,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_from_packed_arrays_ordered_u40(
+    num_nodes: u64,
+    src_low: *const u32,
+    src_high: *const u8,
+    dst_low: *const u32,
+    dst_high: *const u8,
+    num_edges: u64,
+) -> *mut WideBCTreeFFI {
+    wide_bc_tree_from_packed_arrays_u40(
+        num_nodes, src_low, src_high, dst_low, dst_high, num_edges, false, true, false,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_from_packed_arrays_compact_u40(
+    num_nodes: u64,
+    src_low: *const u32,
+    src_high: *const u8,
+    dst_low: *const u32,
+    dst_high: *const u8,
+    num_edges: u64,
+) -> *mut WideBCTreeFFI {
+    wide_bc_tree_from_packed_arrays_u40(
+        num_nodes, src_low, src_high, dst_low, dst_high, num_edges, true, false, false,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_from_packed_arrays_cyclic_compact_u40(
+    num_nodes: u64,
+    src_low: *const u32,
+    src_high: *const u8,
+    dst_low: *const u32,
+    dst_high: *const u8,
+    num_edges: u64,
+) -> *mut WideBCTreeFFI {
+    wide_bc_tree_from_packed_arrays_u40(
+        num_nodes, src_low, src_high, dst_low, dst_high, num_edges, true, false, true,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_free_u64(tree: *mut WideBCTreeFFI) {
+    if !tree.is_null() {
+        drop(Box::from_raw(tree));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_get_sizes_u64(
+    tree: *const WideBCTreeFFI,
+    out_num_components: *mut u64,
+    out_num_blocks: *mut u64,
+    out_total_nodes: *mut u64,
+    out_total_edges: *mut u64,
+    out_num_cut_vertices: *mut u64,
+) {
+    for output in [
+        out_num_components,
+        out_num_blocks,
+        out_total_nodes,
+        out_total_edges,
+        out_num_cut_vertices,
+    ] {
+        if !output.is_null() {
+            *output = 0;
+        }
+    }
+    let Some(tree) = tree.as_ref() else {
+        return;
+    };
+    if !out_num_components.is_null() {
+        *out_num_components = tree.inner.num_components;
+    }
+    if !out_num_blocks.is_null() {
+        *out_num_blocks = tree.inner.num_blocks() as u64;
+    }
+    if !out_total_nodes.is_null() {
+        *out_total_nodes = tree.inner.total_block_nodes();
+    }
+    if !out_total_edges.is_null() {
+        *out_total_edges = tree.inner.total_block_edges();
+    }
+    if !out_num_cut_vertices.is_null() {
+        *out_num_cut_vertices = tree.inner.num_cut_vertices() as u64;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_identity_node_prefix_u64(
+    tree: *const WideBCTreeFFI,
+) -> u64 {
+    tree.as_ref()
+        .map_or(0, |tree| tree.inner.identity_node_prefix())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_identity_edge_prefix_u64(
+    tree: *const WideBCTreeFFI,
+) -> u64 {
+    tree.as_ref()
+        .map_or(0, |tree| tree.inner.identity_edge_prefix())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_is_biconnected_u64(tree: *const WideBCTreeFFI) -> bool {
+    tree.as_ref()
+        .is_some_and(|tree| tree.inner.is_biconnected())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_is_cut_vertex_u64(
+    tree: *const WideBCTreeFFI,
+    node: u64,
+) -> bool {
+    tree.as_ref()
+        .is_some_and(|tree| tree.inner.is_cut_vertex(node))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_bulk_export_u64(
+    tree: *const WideBCTreeFFI,
+    block_node_offsets: *mut u64,
+    block_nodes: *mut u64,
+    block_edge_offsets: *mut u64,
+    block_edges: *mut u64,
+    cut_vertices: *mut u64,
+) -> bool {
+    let Some(tree) = tree.as_ref() else {
+        return false;
+    };
+    let tree = &tree.inner;
+    if !block_nodes.is_null() && !tree.stores_block_nodes() {
+        return false;
+    }
+    if !block_node_offsets.is_null() {
+        for index in 0..=tree.num_blocks() {
+            *block_node_offsets.add(index) = tree.block_node_offset(index);
+        }
+    }
+    if !block_nodes.is_null() {
+        if let Some(values) = tree.nodes_flat_u64() {
+            ptr::copy_nonoverlapping(values.as_ptr(), block_nodes, values.len());
+        } else {
+            for index in 0..tree.total_block_nodes() as usize {
+                *block_nodes.add(index) = tree.node_at(index);
+            }
+        }
+    }
+    if !block_edge_offsets.is_null() {
+        for index in 0..=tree.num_blocks() {
+            *block_edge_offsets.add(index) = tree.block_edge_offset(index);
+        }
+    }
+    if !block_edges.is_null() {
+        if let Some(values) = tree.edges_flat_u64() {
+            ptr::copy_nonoverlapping(values.as_ptr(), block_edges, values.len());
+        } else {
+            for index in 0..tree.total_block_edges() as usize {
+                *block_edges.add(index) = tree.edge_at(index);
+            }
+        }
+    }
+    if !cut_vertices.is_null() {
+        ptr::copy_nonoverlapping(
+            tree.cut_vertices().as_ptr(),
+            cut_vertices,
+            tree.cut_vertices().len(),
+        );
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_nodes_u64(
+    tree: *const WideBCTreeFFI,
+    out_len: *mut u64,
+) -> *const u64 {
+    let values = tree.as_ref().and_then(|tree| tree.inner.nodes_flat_u64());
+    ffi_slice_ptr(values, out_len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_edges_u64(
+    tree: *const WideBCTreeFFI,
+    out_len: *mut u64,
+) -> *const u64 {
+    let values = tree.as_ref().and_then(|tree| tree.inner.edges_flat_u64());
+    ffi_slice_ptr(values, out_len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_nodes_u40(
+    tree: *const WideBCTreeFFI,
+    out_low: *mut *const u32,
+    out_high: *mut *const u8,
+    out_len: *mut u64,
+) -> bool {
+    let values = tree.as_ref().and_then(|tree| tree.inner.nodes_flat_u40());
+    ffi_packed_u40_ptrs(values, out_low, out_high, out_len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_edges_u40(
+    tree: *const WideBCTreeFFI,
+    out_low: *mut *const u32,
+    out_high: *mut *const u8,
+    out_len: *mut u64,
+) -> bool {
+    let values = tree.as_ref().and_then(|tree| tree.inner.edges_flat_u40());
+    ffi_packed_u40_ptrs(values, out_low, out_high, out_len)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_wide_bc_tree_cut_vertices_u64(
+    tree: *const WideBCTreeFFI,
+    out_len: *mut u64,
+) -> *const u64 {
+    ffi_slice_ptr(tree.as_ref().map(|tree| tree.inner.cut_vertices()), out_len)
+}
+
+#[no_mangle]
 pub extern "C" fn spqr_graph_new(node_capacity: u32, edge_capacity: u32) -> *mut Graph {
     Box::into_raw(Box::new(Graph::with_capacity(
         node_capacity as usize,
