@@ -1120,6 +1120,732 @@ pub unsafe extern "C" fn spqr_wide_bc_tree_cut_vertices_u64(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn spqr_build_u64(graph: *const Graph64) -> *mut SpqrResult64 {
+    if graph.is_null() {
+        return ptr::null_mut();
+    }
+    let graph_ref = &(*graph).inner;
+    if !wide_graph_is_buildable(graph_ref) {
+        return ptr::null_mut();
+    }
+    let Ok(inner) = catch_unwind(AssertUnwindSafe(|| crate::wide::build_spqr(graph_ref))) else {
+        return ptr::null_mut();
+    };
+    make_spqr_result64(inner)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_build_u64_releasing(graph: *mut Graph64) -> *mut SpqrResult64 {
+    let Some(graph) = graph64_mut(graph) else {
+        return ptr::null_mut();
+    };
+    if !wide_graph_is_buildable(graph) {
+        return ptr::null_mut();
+    }
+    let Ok(inner) = catch_unwind(AssertUnwindSafe(|| {
+        crate::wide::build_spqr_releasing(graph)
+    })) else {
+        return ptr::null_mut();
+    };
+    make_spqr_result64(inner)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_build_u64_payload_releasing(
+    graph: *mut Graph64,
+) -> *mut SpqrPayloadResult64 {
+    let Some(graph) = graph64_mut(graph) else {
+        return ptr::null_mut();
+    };
+    if !wide_graph_is_buildable(graph) {
+        return ptr::null_mut();
+    }
+    let Ok(inner) = catch_unwind(AssertUnwindSafe(|| {
+        crate::wide::build_spqr_payload_releasing(graph)
+    })) else {
+        return ptr::null_mut();
+    };
+    Box::into_raw(Box::new(SpqrPayloadResult64 { inner }))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_payload_result_free_u64(result: *mut SpqrPayloadResult64) {
+    if !result.is_null() {
+        drop(Box::from_raw(result));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_payload_result_tree_u64(
+    result: *const SpqrPayloadResult64,
+) -> *const crate::wide::SpqrPayloadTree {
+    if result.is_null() {
+        return ptr::null();
+    }
+    &(*result).inner.tree
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_payload_tree_columns_u64(
+    tree: *const crate::wide::SpqrPayloadTree,
+    out: *mut SpqrPayloadTreeColumns64,
+) -> bool {
+    let (Some(tree), Some(out)) = (tree.as_ref(), out.as_mut()) else {
+        return false;
+    };
+    *out = SpqrPayloadTreeColumns64 {
+        root: tree.root.0,
+        tree_nodes: tree.node_types.len() as u64,
+        children: tree.children.len() as u64,
+        skeleton_edges: tree.skeleton_edge_count() as u64,
+        node_mapping: tree.node_mapping_count() as u64,
+        node_types: tree.node_types.as_ptr() as *const u8,
+        node_parents: tree.node_parents.as_ptr() as *const u64,
+        children_offsets: tree.children_offsets.as_ptr(),
+        child_nodes: tree.children.as_ptr() as *const u64,
+        skeleton_offsets: tree.skeleton_offsets.as_ptr(),
+        node_mapping_offsets: tree.node_mapping_offsets.as_ptr(),
+        node_mapping_values: tree.plain_node_mapping() as *const u64,
+        skeleton_num_nodes: tree.skeleton_num_nodes.as_ptr(),
+    };
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_payload_tree_skeleton_edges_u64(
+    tree: *const crate::wide::SpqrPayloadTree,
+) -> *const crate::wide::SkeletonEdge {
+    let Some(tree) = tree.as_ref() else {
+        return ptr::null();
+    };
+    tree.plain_skeleton_edges()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_payload_tree_packed_skeleton_u64(
+    tree: *const crate::wide::SpqrPayloadTree,
+    out: *mut SpqrPackedSkeleton64,
+) -> bool {
+    let (Some(tree), Some(out)) = (tree.as_ref(), out.as_mut()) else {
+        return false;
+    };
+    let Some(columns) = tree.packed_skeleton_columns() else {
+        return false;
+    };
+    let pair_count = columns.first_tree_low.len() as u64;
+    *out = SpqrPackedSkeleton64 {
+        edge_words: columns.edge_words,
+        edge_count: columns.edge_count as u64,
+        first_virtual: columns.first_virtual,
+        first_tree: packed_u40_column(columns.first_tree_low, columns.first_tree_high),
+        first_edge: packed_u40_column(columns.first_edge_low, columns.first_edge_high),
+        second_tree: packed_u40_column(columns.second_tree_low, columns.second_tree_high),
+        second_edge: packed_u40_column(columns.second_edge_low, columns.second_edge_high),
+    };
+    out.first_tree.count == pair_count
+        && out.first_edge.count == pair_count
+        && out.second_tree.count == pair_count
+        && out.second_edge.count == pair_count
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_payload_tree_copy_skeleton_edges_u64(
+    tree: *const crate::wide::SpqrPayloadTree,
+    first: u64,
+    out: *mut crate::wide::SkeletonEdge,
+    count: u64,
+) -> bool {
+    let Some(tree) = tree.as_ref() else {
+        return false;
+    };
+    let Some(first) = ffi_u64_to_usize(first) else {
+        return false;
+    };
+    let Some(count) = ffi_u64_to_usize(count) else {
+        return false;
+    };
+    let Some(end) = first.checked_add(count) else {
+        return false;
+    };
+    if end > tree.skeleton_edge_count() || (count != 0 && out.is_null()) {
+        return false;
+    }
+    for index in 0..count {
+        out.add(index).write(tree.skeleton_edge(first + index));
+    }
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_payload_tree_copy_node_mapping_u64(
+    tree: *const crate::wide::SpqrPayloadTree,
+    first: u64,
+    out: *mut u64,
+    count: u64,
+) -> bool {
+    let Some(tree) = tree.as_ref() else {
+        return false;
+    };
+    let Some(first) = ffi_u64_to_usize(first) else {
+        return false;
+    };
+    let Some(count) = ffi_u64_to_usize(count) else {
+        return false;
+    };
+    let Some(end) = first.checked_add(count) else {
+        return false;
+    };
+    if end > tree.node_mapping_count() {
+        return false;
+    }
+    if count == 0 {
+        return true;
+    }
+    if out.is_null() {
+        return false;
+    }
+    let values = std::slice::from_raw_parts_mut(out, count);
+    tree.copy_node_mapping_u64(first, values);
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_payload_tree_node_mapping_u40(
+    tree: *const crate::wide::SpqrPayloadTree,
+    out: *mut SpqrPackedU40Column64,
+) -> bool {
+    let (Some(tree), Some(out)) = (tree.as_ref(), out.as_mut()) else {
+        return false;
+    };
+    let Some((low, high)) = tree.packed_node_mapping() else {
+        return false;
+    };
+    *out = packed_u40_column(low, high);
+    true
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_result_free_u64(result: *mut SpqrResult64) {
+    if !result.is_null() {
+        drop(Box::from_raw(result));
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_result_tree_u64(
+    result: *const SpqrResult64,
+) -> *const crate::wide::SpqrTree {
+    if result.is_null() {
+        return ptr::null();
+    }
+    &(*result).inner.tree
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_result_self_loops_u64(
+    result: *const SpqrResult64,
+    out_len: *mut u64,
+) -> *const u64 {
+    ffi_slice_ptr(
+        result
+            .as_ref()
+            .map(|result| result.self_loops_u64.as_slice()),
+        out_len,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_len_u64(tree: *const crate::wide::SpqrTree) -> u64 {
+    tree64(tree).map_or(0, |tree| tree.len() as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_root_u64(tree: *const crate::wide::SpqrTree) -> u64 {
+    tree64(tree)
+        .map(|tree| ffi_u64_or_invalid(tree.root.0))
+        .unwrap_or_else(ffi_u64_invalid)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_node_type_u64(
+    tree: *const crate::wide::SpqrTree,
+    node_id: u64,
+) -> u8 {
+    tree64_node(tree, node_id)
+        .map(|node| spqr_node_type_byte_u64(node.node_type))
+        .unwrap_or(u8::MAX)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_node_parent_u64(
+    tree: *const crate::wide::SpqrTree,
+    node_id: u64,
+) -> u64 {
+    tree64_node(tree, node_id)
+        .map(|node| ffi_u64_or_invalid(node.parent.0))
+        .unwrap_or_else(ffi_u64_invalid)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_node_children_copy_u64(
+    tree: *const crate::wide::SpqrTree,
+    node_id: u64,
+    out_children: *mut u64,
+    out_capacity: u64,
+) -> u64 {
+    if tree.is_null() {
+        return 0;
+    }
+    let Some(node_idx) = ffi_u64_to_usize(node_id) else {
+        return 0;
+    };
+    let tree = &*tree;
+    if node_idx >= tree.len() {
+        return 0;
+    }
+    let children = tree.node(crate::wide::TreeNodeId(node_id)).children;
+    let total = children.len() as u64;
+    if !out_children.is_null() {
+        let ncopy = std::cmp::min(out_capacity, total) as usize;
+        for i in 0..ncopy {
+            *out_children.add(i) = ffi_u64_or_invalid(children[i].0);
+        }
+    }
+    total
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_skeleton_num_edges_u64(
+    tree: *const crate::wide::SpqrTree,
+    node_id: u64,
+) -> u64 {
+    tree64_node(tree, node_id).map_or(0, |node| node.skeleton.num_edges() as u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_skeleton_num_nodes_u64(
+    tree: *const crate::wide::SpqrTree,
+    node_id: u64,
+) -> u64 {
+    tree64_node(tree, node_id).map_or(0, |node| node.skeleton.num_nodes)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_skeleton_poles_u64(
+    tree: *const crate::wide::SpqrTree,
+    node_id: u64,
+    pole1: *mut u64,
+    pole2: *mut u64,
+) {
+    if !pole1.is_null() {
+        *pole1 = ffi_u64_invalid();
+    }
+    if !pole2.is_null() {
+        *pole2 = ffi_u64_invalid();
+    }
+    let Some(node) = tree64_node(tree, node_id) else {
+        return;
+    };
+    let (p1, p2) = node.skeleton.poles();
+    if !pole1.is_null() {
+        *pole1 = ffi_u64_or_invalid(p1.0);
+    }
+    if !pole2.is_null() {
+        *pole2 = ffi_u64_or_invalid(p2.0);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_skeleton_edge_u64(
+    tree: *const crate::wide::SpqrTree,
+    node_id: u64,
+    edge_idx: u64,
+    out: *mut SkeletonEdgeInfo64,
+) {
+    if out.is_null() {
+        return;
+    }
+    (*out).src = ffi_u64_invalid();
+    (*out).dst = ffi_u64_invalid();
+    (*out).real_edge = ffi_u64_invalid();
+    (*out).twin_tree_node = ffi_u64_invalid();
+    (*out).is_virtual = false;
+    let Some(edge_idx_usize) = ffi_u64_to_usize(edge_idx) else {
+        return;
+    };
+    let Some(node) = tree64_node(tree, node_id) else {
+        return;
+    };
+    let skeleton = node.skeleton;
+    if edge_idx_usize >= skeleton.edges.len() {
+        return;
+    }
+    let edge = &skeleton.edges[edge_idx_usize];
+    (*out).src = ffi_u64_or_invalid(edge.src.0);
+    (*out).dst = ffi_u64_or_invalid(edge.dst.0);
+    (*out).real_edge = ffi_u64_or_invalid(edge.real_edge.0);
+    (*out).twin_tree_node = ffi_u64_or_invalid(edge.twin_tree_node.0);
+    (*out).is_virtual = edge.twin_tree_node.is_valid();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_skeleton_original_node_u64(
+    tree: *const crate::wide::SpqrTree,
+    tree_node_id: u64,
+    local_node: u64,
+) -> u64 {
+    let Some(local_idx) = ffi_u64_to_usize(local_node) else {
+        return ffi_u64_invalid();
+    };
+    let Some(node) = tree64_node(tree, tree_node_id) else {
+        return ffi_u64_invalid();
+    };
+    let skeleton = node.skeleton;
+    if local_idx >= skeleton.node_to_original.len() {
+        return ffi_u64_invalid();
+    }
+    ffi_u64_or_invalid(skeleton.node_to_original[local_idx].0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_node_of_edge_u64(
+    tree: *const crate::wide::SpqrTree,
+    edge_id: u64,
+) -> u64 {
+    if tree.is_null() {
+        return ffi_u64_invalid();
+    }
+    let Some(edge_idx) = ffi_u64_to_usize(edge_id) else {
+        return ffi_u64_invalid();
+    };
+    let tree = &*tree;
+    if edge_idx >= tree.edge_to_tree_node.len() {
+        return ffi_u64_invalid();
+    }
+    ffi_u64_or_invalid(tree.tree_node_of_edge(crate::wide::EdgeId(edge_id)).0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_edge_mapping_copy_u64(
+    tree: *const crate::wide::SpqrTree,
+    out_tree_nodes: *mut u64,
+    out_capacity: u64,
+) -> u64 {
+    if tree.is_null() {
+        return 0;
+    }
+    let tree = &*tree;
+    let total = tree.edge_to_tree_node.len() as u64;
+    if !out_tree_nodes.is_null() {
+        let ncopy = std::cmp::min(out_capacity, total) as usize;
+        for i in 0..ncopy {
+            *out_tree_nodes.add(i) = ffi_u64_or_invalid(tree.edge_to_tree_node[i].0);
+        }
+    }
+    total
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_get_sizes_u64(
+    tree: *const crate::wide::SpqrTree,
+    out_num_nodes: *mut u64,
+    out_total_children: *mut u64,
+    out_total_skeleton_edges: *mut u64,
+) {
+    if !out_num_nodes.is_null() {
+        *out_num_nodes = 0;
+    }
+    if !out_total_children.is_null() {
+        *out_total_children = 0;
+    }
+    if !out_total_skeleton_edges.is_null() {
+        *out_total_skeleton_edges = 0;
+    }
+    if tree.is_null() {
+        return;
+    }
+    let tree = &*tree;
+    if !out_num_nodes.is_null() {
+        *out_num_nodes = tree.len() as u64;
+    }
+    if !out_total_children.is_null() {
+        *out_total_children = tree.children.len() as u64;
+    }
+    if !out_total_skeleton_edges.is_null() {
+        *out_total_skeleton_edges = tree.skeleton_edges.len() as u64;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_bulk_export_u64(
+    tree: *const crate::wide::SpqrTree,
+    node_types: *mut u8,
+    node_parents: *mut u64,
+    children_offsets: *mut u64,
+    children: *mut u64,
+    skeleton_offsets: *mut u64,
+    skeleton_src: *mut u64,
+    skeleton_dst: *mut u64,
+    skeleton_real_edge: *mut u64,
+    skeleton_is_virtual: *mut u8,
+) {
+    if tree.is_null() {
+        return;
+    }
+    let tree = &*tree;
+    let n = tree.len();
+    for i in 0..n {
+        if !node_types.is_null() {
+            *node_types.add(i) = spqr_node_type_byte_u64(tree.node_types[i]);
+        }
+        if !node_parents.is_null() {
+            *node_parents.add(i) = ffi_u64_or_invalid(tree.node_parents[i].0);
+        }
+    }
+    if !children_offsets.is_null() {
+        for i in 0..=n {
+            *children_offsets.add(i) = tree.children_offsets[i];
+        }
+    }
+    if !children.is_null() {
+        for (i, child) in tree.children.iter().enumerate() {
+            *children.add(i) = ffi_u64_or_invalid(child.0);
+        }
+    }
+    if !skeleton_offsets.is_null() {
+        for i in 0..=n {
+            *skeleton_offsets.add(i) = tree.skeleton_offsets[i];
+        }
+    }
+    for (i, edge) in tree.skeleton_edges.iter().enumerate() {
+        if !skeleton_src.is_null() {
+            *skeleton_src.add(i) = ffi_u64_or_invalid(edge.src.0);
+        }
+        if !skeleton_dst.is_null() {
+            *skeleton_dst.add(i) = ffi_u64_or_invalid(edge.dst.0);
+        }
+        if !skeleton_real_edge.is_null() {
+            *skeleton_real_edge.add(i) = ffi_u64_or_invalid(edge.real_edge.0);
+        }
+        if !skeleton_is_virtual.is_null() {
+            *skeleton_is_virtual.add(i) = if edge.twin_tree_node.is_valid() { 1 } else { 0 };
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_bulk_export_node_mapping_u64(
+    tree: *const crate::wide::SpqrTree,
+    node_mapping_offsets: *mut u64,
+    node_mapping: *mut u64,
+) {
+    if tree.is_null() {
+        return;
+    }
+    let tree = &*tree;
+    let n = tree.len();
+    if !node_mapping_offsets.is_null() {
+        for i in 0..=n {
+            *node_mapping_offsets.add(i) = tree.node_mapping_offsets[i];
+        }
+    }
+    if !node_mapping.is_null() {
+        for (i, orig) in tree.node_mapping.iter().enumerate() {
+            *node_mapping.add(i) = ffi_u64_or_invalid(orig.0);
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_edge_mapping_raw_u64(
+    tree: *const crate::wide::SpqrTree,
+    out_len: *mut u64,
+) -> *const u64 {
+    ffi_slice_ptr(
+        tree.as_ref().map(|tree| tree.edge_to_tree_node.as_slice()),
+        out_len,
+    ) as *const u64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_edge_mapping_bulk_u64(
+    tree: *const crate::wide::SpqrTree,
+    num_edges: u64,
+    out_tree_nodes: *mut u64,
+) {
+    if tree.is_null() || out_tree_nodes.is_null() {
+        return;
+    }
+    let Some(n) = ffi_u64_to_usize(num_edges) else {
+        return;
+    };
+    let tree = &*tree;
+    let n = n.min(tree.edge_to_tree_node.len());
+    for i in 0..n {
+        *out_tree_nodes.add(i) = ffi_u64_or_invalid(tree.edge_to_tree_node[i].0);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_normalize_u64(tree: *mut crate::wide::SpqrTree) {
+    if let Some(tree) = tree64_mut(tree) {
+        tree.normalize();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_compact_u64(tree: *mut crate::wide::SpqrTree) {
+    if let Some(tree) = tree64_mut(tree) {
+        tree.compact();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_count_by_type_u64(
+    tree: *const crate::wide::SpqrTree,
+    s_count: *mut u64,
+    p_count: *mut u64,
+    r_count: *mut u64,
+) {
+    if !s_count.is_null() {
+        *s_count = 0;
+    }
+    if !p_count.is_null() {
+        *p_count = 0;
+    }
+    if !r_count.is_null() {
+        *r_count = 0;
+    }
+    if tree.is_null() {
+        return;
+    }
+    let (s, p, r) = (*tree).count_by_type();
+    if !s_count.is_null() {
+        *s_count = s as u64;
+    }
+    if !p_count.is_null() {
+        *p_count = p as u64;
+    }
+    if !r_count.is_null() {
+        *r_count = r as u64;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_info_u64(
+    tree: *const crate::wide::SpqrTree,
+    out_num_nodes: *mut u64,
+    out_root: *mut u64,
+) {
+    if !out_num_nodes.is_null() {
+        *out_num_nodes = 0;
+    }
+    if !out_root.is_null() {
+        *out_root = ffi_u64_invalid();
+    }
+    if tree.is_null() {
+        return;
+    }
+    let tree = &*tree;
+    if !out_num_nodes.is_null() {
+        *out_num_nodes = tree.len() as u64;
+    }
+    if !out_root.is_null() {
+        *out_root = ffi_u64_or_invalid(tree.root.0);
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_node_types_raw_u64(
+    tree: *const crate::wide::SpqrTree,
+) -> *const u8 {
+    tree.as_ref()
+        .map_or(ptr::null(), |tree| tree.node_types.as_ptr() as *const u8)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_node_parents_raw_u64(
+    tree: *const crate::wide::SpqrTree,
+) -> *const u64 {
+    tree.as_ref()
+        .map_or(ptr::null(), |tree| tree.node_parents.as_ptr() as *const u64)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_children_offsets_raw_u64(
+    tree: *const crate::wide::SpqrTree,
+) -> *const u64 {
+    tree.as_ref()
+        .map_or(ptr::null(), |tree| tree.children_offsets.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_children_raw_u64(
+    tree: *const crate::wide::SpqrTree,
+    out_len: *mut u64,
+) -> *const u64 {
+    ffi_slice_ptr(tree.as_ref().map(|tree| tree.children.as_slice()), out_len) as *const u64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_skeleton_offsets_raw_u64(
+    tree: *const crate::wide::SpqrTree,
+) -> *const u64 {
+    tree.as_ref()
+        .map_or(ptr::null(), |tree| tree.skeleton_offsets.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_skeleton_edges_raw_u64(
+    tree: *const crate::wide::SpqrTree,
+    out_len: *mut u64,
+) -> *const crate::wide::SkeletonEdge {
+    ffi_slice_ptr(
+        tree.as_ref().map(|tree| tree.skeleton_edges.as_slice()),
+        out_len,
+    )
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_node_mapping_raw_u64(
+    tree: *const crate::wide::SpqrTree,
+    out_offsets: *mut *const u64,
+    out_mapping: *mut *const u64,
+    out_mapping_len: *mut u64,
+) {
+    if !out_offsets.is_null() {
+        *out_offsets = ptr::null();
+    }
+    if !out_mapping.is_null() {
+        *out_mapping = ptr::null();
+    }
+    if !out_mapping_len.is_null() {
+        *out_mapping_len = 0;
+    }
+    if tree.is_null() {
+        return;
+    }
+    let t = &*tree;
+    if !out_offsets.is_null() {
+        *out_offsets = t.node_mapping_offsets.as_ptr();
+    }
+    if !out_mapping.is_null() {
+        *out_mapping = t.node_mapping.as_ptr() as *const u64;
+    }
+    if !out_mapping_len.is_null() {
+        *out_mapping_len = t.node_mapping.len() as u64;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn spqr_tree_skeleton_num_nodes_raw_u64(
+    tree: *const crate::wide::SpqrTree,
+) -> *const u64 {
+    tree.as_ref()
+        .map_or(ptr::null(), |tree| tree.skeleton_num_nodes.as_ptr())
+}
+
+#[no_mangle]
 pub extern "C" fn spqr_graph_new(node_capacity: u32, edge_capacity: u32) -> *mut Graph {
     Box::into_raw(Box::new(Graph::with_capacity(
         node_capacity as usize,

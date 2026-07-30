@@ -228,6 +228,25 @@ bool spqr_wide_bc_tree_edges_u40(const SpqrWideBCTreeFFI* tree,
 const uint64_t* spqr_wide_bc_tree_cut_vertices_u64(const SpqrWideBCTreeFFI* tree,
                                                    uint64_t* out_len);
 SpqrResult64* spqr_build_u64(const SpqrGraphFFI64* graph);
+SpqrResult64* spqr_build_u64_releasing(SpqrGraphFFI64* graph);
+SpqrPayloadResult64* spqr_build_u64_payload_releasing(SpqrGraphFFI64* graph);
+void spqr_payload_result_free_u64(SpqrPayloadResult64* result);
+const SpqrPayloadTree64* spqr_payload_result_tree_u64(const SpqrPayloadResult64* result);
+bool spqr_payload_tree_columns_u64(const SpqrPayloadTree64* tree,
+                                   SpqrPayloadTreeColumns64* out);
+const SkeletonEdge64* spqr_payload_tree_skeleton_edges_u64(const SpqrPayloadTree64* tree);
+bool spqr_payload_tree_packed_skeleton_u64(const SpqrPayloadTree64* tree,
+                                           SpqrPackedSkeleton64* out);
+bool spqr_payload_tree_copy_skeleton_edges_u64(const SpqrPayloadTree64* tree,
+                                               uint64_t first,
+                                               SkeletonEdge64* out,
+                                               uint64_t count);
+bool spqr_payload_tree_copy_node_mapping_u64(const SpqrPayloadTree64* tree,
+                                             uint64_t first,
+                                             uint64_t* out,
+                                             uint64_t count);
+bool spqr_payload_tree_node_mapping_u40(const SpqrPayloadTree64* tree,
+                                        SpqrPackedU40Column64* out);
 void spqr_result_free_u64(SpqrResult64* result);
 const SpqrTree64* spqr_result_tree_u64(const SpqrResult64* result);
 const uint64_t* spqr_result_self_loops_u64(const SpqrResult64* result, uint64_t* out_len);
