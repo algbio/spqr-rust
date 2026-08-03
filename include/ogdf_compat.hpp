@@ -392,7 +392,34 @@ public:
 
 using tree_node = node;
 
+class CompactTreeCore {
+    uint32_t n_ = 0;
+    std::vector<uint32_t> parents_, src_, tgt_;
+
+public:
+    void build(uint32_t n, const uint32_t* parents) {
+        n_ = n;
+        parents_.clear();
+        if (n != 0) parents_.assign(parents, parents + n);
+        src_.clear();
+        tgt_.clear();
+        for (uint32_t child = 0; child < n_; ++child) {
+            if (parents_[child] != UINT32_MAX && parents_[child] != child) {
+                src_.push_back(parents_[child]);
+                tgt_.push_back(child);
+            }
+        }
+    }
+
+    uint32_t numberOfNodes() const { return n_; }
+    uint32_t numberOfEdges() const { return static_cast<uint32_t>(src_.size()); }
+    node source(edge e) const { return node{src_[e.idx]}; }
+    node target(edge e) const { return node{tgt_[e.idx]}; }
+    uint32_t parentIndex(node v) const { return parents_[v.idx]; }
+};
 class TreeGraph {
+public:
+    enum class BuildMode { FullAdjacency, EdgeOnly };
     uint32_t n_ = 0;
     std::vector<uint32_t> parents_, src_, tgt_;
     std::vector<std::vector<std::pair<uint32_t, uint32_t>>> adj_;  // adj_[v] = [(neighbor, edge_idx), ...]
@@ -1169,6 +1196,8 @@ public:
 using tree_node = node;
 
 class TreeGraph {
+public:
+    enum class BuildMode { FullAdjacency, EdgeOnly };
     uint32_t n_ = 0;
     std::vector<uint32_t> parents_, src_, tgt_;
     std::vector<std::vector<std::pair<uint32_t, uint32_t>>> adj_;
