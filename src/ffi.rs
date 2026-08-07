@@ -807,6 +807,7 @@ pub unsafe extern "C" fn spqr_wide_bc_tree_from_arrays_cyclic_u64(
     wide_bc_tree_from_arrays_u64(num_nodes, src, dst, num_edges, false, true)
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn wide_bc_tree_from_packed_arrays_u40(
     num_nodes: u64,
     src_low: *const u32,

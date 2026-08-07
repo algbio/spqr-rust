@@ -59,10 +59,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Instant;
 
+#[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(pub u32);
+#[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EdgeId(pub u32);
+#[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TreeNodeId(pub u32);
 

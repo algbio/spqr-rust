@@ -174,6 +174,8 @@ enum NodeColumn {
     Wide(Vec<u64>),
 }
 
+pub(crate) type PackedEdgeParts<'a> = (&'a [u32], &'a [u8], &'a [u32], &'a [u8]);
+
 impl NodeColumn {
     fn worth_shrinking(len: usize, capacity: usize, unused_bytes: u128) -> bool {
         (len as u128) * 4 <= (capacity as u128) * 3 && unused_bytes >= WORK_GRAPH_SHRINK_MIN_SAVINGS
@@ -381,7 +383,7 @@ impl NodeColumn {
         }
     }
 
-    fn split_packed_parts(&self) -> Option<(&[u32], &[u8], &[u32], &[u8])> {
+    fn split_packed_parts(&self) -> Option<PackedEdgeParts<'_>> {
         match self {
             Self::SplitPacked {
                 source_low,
@@ -584,9 +586,7 @@ impl Clone for NextColumn {
 impl NextColumn {
     fn with_capacity(num_edges: usize) -> Self {
         let capacity = num_edges.checked_mul(2).expect("wide graph is too large");
-        if capacity as u64 > NEXT_PACKED_MAX {
-            Self::Plain(Vec::with_capacity(capacity))
-        } else if capacity <= u32::MAX as usize {
+        if capacity as u64 > NEXT_PACKED_MAX || capacity <= u32::MAX as usize {
             Self::Plain(Vec::with_capacity(capacity))
         } else {
             Self::Packed {
@@ -984,7 +984,7 @@ impl PackedI40Column {
     #[inline(always)]
     fn encode(value: i64) -> u64 {
         assert!(
-            value >= -(1i64 << 39) && value < (1i64 << 39),
+            (-(1i64 << 39)..(1i64 << 39)).contains(&value),
             "value does not fit in a signed 40-bit column"
         );
         (value as u64) & U40_MAX
@@ -1090,16 +1090,14 @@ impl CountColumn {
                     .expect("missing count overflow value");
             }
             self.values[index] = value as u8;
+        } else if self.values[index] == Self::OVERFLOW {
+            *self
+                .overflow
+                .get_mut(&index)
+                .expect("missing count overflow value") = value;
         } else {
-            if self.values[index] == Self::OVERFLOW {
-                *self
-                    .overflow
-                    .get_mut(&index)
-                    .expect("missing count overflow value") = value;
-            } else {
-                self.values[index] = Self::OVERFLOW;
-                self.overflow.insert(index, value);
-            }
+            self.values[index] = Self::OVERFLOW;
+            self.overflow.insert(index, value);
         }
     }
 
@@ -1546,7 +1544,7 @@ impl Graph {
         self.targets.packed_parts()
     }
 
-    pub(crate) fn split_packed_edge_storage(&self) -> Option<(&[u32], &[u8], &[u32], &[u8])> {
+    pub(crate) fn split_packed_edge_storage(&self) -> Option<PackedEdgeParts<'_>> {
         self.targets.split_packed_parts()
     }
 
@@ -1761,7 +1759,7 @@ fn build_wide_adjacency<T: TargetColumn + ?Sized>(
     node_count: usize,
     targets: &T,
 ) -> Option<(HeadColumn, NextColumn)> {
-    if targets.len() % 2 != 0 {
+    if !targets.len().is_multiple_of(2) {
         return None;
     }
     let edge_count = targets.len() / 2;
@@ -1808,7 +1806,9 @@ fn build_wide_adjacency<T: TargetColumn + ?Sized>(
                     let edge_start = chunk_index * edge_chunk_len;
                     let atomic_heads = &atomic_heads;
                     scope.spawn(move || {
-                        for (offset, pair_next) in next_chunk.chunks_exact_mut(2).enumerate() {
+                        let (pair_chunks, remainder) = next_chunk.as_chunks_mut::<2>();
+                        debug_assert!(remainder.is_empty());
+                        for (offset, pair_next) in pair_chunks.iter_mut().enumerate() {
                             let first = (edge_start + offset) * 2;
                             let dst = targets.get(first);
                             let src = targets.get(first + 1);
@@ -1832,7 +1832,9 @@ fn build_wide_adjacency<T: TargetColumn + ?Sized>(
                     let atomic_heads = &atomic_heads;
                     let high = &high;
                     scope.spawn(move || {
-                        for (offset, pair_next) in next_chunk.chunks_exact_mut(2).enumerate() {
+                        let (pair_chunks, remainder) = next_chunk.as_chunks_mut::<2>();
+                        debug_assert!(remainder.is_empty());
+                        for (offset, pair_next) in pair_chunks.iter_mut().enumerate() {
                             let first = (edge_start + offset) * 2;
                             let dst = targets.get(first);
                             let src = targets.get(first + 1);
@@ -1910,7 +1912,7 @@ fn build_wide_adjacency<T: TargetColumn + ?Sized>(
 trait GraphAccess: Deref<Target = Graph> {
     #[inline(always)]
     fn as_graph(&self) -> &Graph {
-        &**self
+        self
     }
 
     fn release_adjacency(&mut self);
@@ -2850,12 +2852,10 @@ impl<E: SkeletonEdgeStorage, M: NodeMappingStorage, const TRACK_EDGE_MAPPING: bo
 
     #[inline(always)]
     fn push_edge(&mut self, tid: TreeNodeId, edge: SkeletonEdge) {
-        if edge.real_edge.is_valid() {
-            if TRACK_EDGE_MAPPING {
-                self.edge_to_tree_node[edge.real_edge.idx()] = tid;
-                let minimum = &mut self.min_real_per_node[tid.idx()];
-                *minimum = (*minimum).min(edge.real_edge.0);
-            }
+        if edge.real_edge.is_valid() && TRACK_EDGE_MAPPING {
+            self.edge_to_tree_node[edge.real_edge.idx()] = tid;
+            let minimum = &mut self.min_real_per_node[tid.idx()];
+            *minimum = (*minimum).min(edge.real_edge.0);
         }
         self.skeleton_edges.push(edge);
     }
@@ -4011,11 +4011,7 @@ fn build_spqr_tree_filtered_view_impl<
                 Some((components, synthetic, consumed))
             }
         };
-        if split.is_none() {
-            multi_comps = Vec::new();
-            relabel_edges = false;
-        } else {
-            let (split_multi_comps, synthetic, consumed) = split.unwrap();
+        if let Some((split_multi_comps, synthetic, consumed)) = split {
             multi_comps = split_multi_comps;
             if let Some(t) = timings.as_mut() {
                 t.c_multi_components = multi_comps.len() as u64;
@@ -4052,6 +4048,9 @@ fn build_spqr_tree_filtered_view_impl<
                 add_timing!(t_work_graph_us, t_work_graph);
                 relabel_edges = true;
             }
+        } else {
+            multi_comps = Vec::new();
+            relabel_edges = false;
         }
     }
 
@@ -4440,6 +4439,7 @@ fn split_multi_edges_with_record_threads<R: ParallelPairEdge, CE: ComponentEdges
     self_loops: SelfLoopFlags<'_>,
     threads: usize,
 ) -> (Vec<SplitComponent<CE>>, Vec<(u64, u64, u64)>, Vec<bool>) {
+    #[allow(clippy::too_many_arguments)]
     fn emit_parallel_group<CE: ComponentEdges>(
         a: u64,
         b: u64,
@@ -4608,11 +4608,16 @@ fn split_multi_edges_with_record_threads<R: ParallelPairEdge, CE: ComponentEdges
     (p_comps, synthetic, consumed)
 }
 
+type MultiEdgeSplitData<CE> = (Vec<SplitComponent<CE>>, Vec<(u64, u64, u64)>, Vec<bool>);
+
+type BoundedSplitOutput<CE> = (Vec<SplitComponent<CE>>, Vec<(u64, u64, u64)>);
+
+#[allow(clippy::type_complexity)]
 fn split_multi_edges<CE: ComponentEdges>(
     graph: &Graph,
     next_virtual: &mut u64,
     self_loops: SelfLoopFlags<'_>,
-) -> (Vec<SplitComponent<CE>>, Vec<(u64, u64, u64)>, Vec<bool>) {
+) -> MultiEdgeSplitData<CE> {
     if graph.num_nodes() <= u32::MAX as usize {
         split_multi_edges_with_record::<CompactPairEdge, CE>(graph, next_virtual, self_loops)
     } else if graph.num_nodes() as u64 <= U40_MAX && graph.num_edges() as u64 <= U40_MAX {
@@ -4708,8 +4713,7 @@ fn split_multi_edges_bounded<CE: ComponentEdges>(
         .checked_add(group_total as u64)
         .expect("wide SPQR virtual edge id overflow");
 
-    let mut output: Vec<Option<(Vec<SplitComponent<CE>>, Vec<(u64, u64, u64)>)>> =
-        (0..workers).map(|_| None).collect();
+    let mut output: Vec<Option<BoundedSplitOutput<CE>>> = (0..workers).map(|_| None).collect();
     thread::scope(|scope| {
         for (worker, slot) in output.iter_mut().enumerate() {
             let mut virtual_id = first_virtual[worker];
@@ -6800,8 +6804,7 @@ fn assemble_spqr_payload_tree<CE: ComponentEdges>(
     if node_count < PACKED_LIMIT
         && edge_count < PACKED_LIMIT
         && components.len() < PACKED_LIMIT
-        && skeleton_edges < PACKED_LIMIT
-        && skeleton_edges >= PAYLOAD_SKELETON_PACK_MIN
+        && (PAYLOAD_SKELETON_PACK_MIN..PACKED_LIMIT).contains(&skeleton_edges)
         && compact_payload_saves_enough(edge_count, skeleton_edges, next_virtual)
         && next_virtual < U40_MAX
     {
@@ -8063,4 +8066,3 @@ impl fmt::Display for SpqrTree {
         Ok(())
     }
 }
-

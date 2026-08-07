@@ -111,20 +111,6 @@ impl<const HIGH_BITS: usize> PackedU32Tail<HIGH_BITS> {
         self.low.len()
     }
 
-    #[cfg(test)]
-    #[inline]
-    fn get(&self, index: usize) -> u64 {
-        let word = index / Self::VALUES_PER_WORD;
-        let tail_start = self.low.len() - self.tail_len;
-        let high = if index < tail_start {
-            self.high[word]
-        } else {
-            self.tail
-        };
-        let shift = (index % Self::VALUES_PER_WORD) * HIGH_BITS;
-        self.low[index] as u64 | ((high >> shift & Self::HIGH_MASK) << 32)
-    }
-
     #[inline]
     fn last(&self) -> u64 {
         let high = if self.tail_len == 0 {
@@ -182,7 +168,7 @@ fn uses_narrow_dfs(max_value: u64, length: usize, high_bits: usize) -> bool {
     }
     let values = length as u128;
     let values_per_word = (64 / high_bits) as u128;
-    let narrow = values * 4 + (values + values_per_word - 1) / values_per_word * 8;
+    let narrow = values * 4 + values.div_ceil(values_per_word) * 8;
     values * 5 >= narrow && values * 5 - narrow >= NARROW_DFS_MIN_SAVINGS
 }
 
@@ -522,21 +508,6 @@ impl<'a> WideCsrGraph<'a> {
         )
     }
 
-    #[cfg(test)]
-    fn from_edge_arrays_with_workers(
-        num_nodes: u64,
-        src: &'a [u64],
-        dst: &'a [u64],
-        workers: usize,
-    ) -> Result<Self, WideBCTreeError> {
-        Self::from_columns(
-            num_nodes,
-            EdgeColumn::Plain(src),
-            EdgeColumn::Plain(dst),
-            workers,
-        )
-    }
-
     pub(crate) fn from_packed_edge_arrays(
         num_nodes: u64,
         src_low: &'a [u32],
@@ -707,8 +678,6 @@ impl<'a> WideCsrGraph<'a> {
                 if edge_start == edge_end {
                     continue;
                 }
-                let src = src;
-                let dst = dst;
                 let counts = &counts;
                 let first_invalid = &first_invalid;
                 let degree_overflow = &degree_overflow;
@@ -758,8 +727,6 @@ impl<'a> WideCsrGraph<'a> {
                     if edge_start == edge_end {
                         continue;
                     }
-                    let src = src;
-                    let dst = dst;
                     let counts = &counts;
                     let offsets = &offsets;
                     let edge_ids = &edge_ids;
@@ -798,8 +765,6 @@ impl<'a> WideCsrGraph<'a> {
                 if edge_start == edge_end {
                     continue;
                 }
-                let src = src;
-                let dst = dst;
                 let counts = &counts;
                 let offsets = &offsets;
                 let edge_ids = &edge_ids;
@@ -852,8 +817,6 @@ impl<'a> WideCsrGraph<'a> {
                 if edge_start == edge_end {
                     continue;
                 }
-                let src = src;
-                let dst = dst;
                 let counts = &counts;
                 scope.spawn(move || {
                     for edge_index in edge_start..edge_end {
@@ -883,8 +846,6 @@ impl<'a> WideCsrGraph<'a> {
                     if edge_start == edge_end {
                         continue;
                     }
-                    let src = src;
-                    let dst = dst;
                     let counts = &counts;
                     let edge_ids = &edge_ids;
                     scope.spawn(move || {
@@ -923,8 +884,6 @@ impl<'a> WideCsrGraph<'a> {
                 if edge_start == edge_end {
                     continue;
                 }
-                let src = src;
-                let dst = dst;
                 let counts = &counts;
                 let edge_ids = &edge_ids;
                 let high = &high;
@@ -1920,7 +1879,7 @@ impl<'graph, 'edges> WideBCTreeBuilder<'graph, 'edges> {
     fn extract_complete_packed_block(&mut self, tree_edge: u64) {
         let edge_start = self.total_block_edges();
         debug_assert!(self.blocks.is_empty());
-        debug_assert!(self.block_nodes_flat.as_ref().map_or(true, IdVec::is_empty));
+        debug_assert!(self.block_nodes_flat.as_ref().is_none_or(IdVec::is_empty));
         debug_assert_eq!(self.pending_block_nodes, 0);
         debug_assert_eq!(self.identity_node_prefix, 0);
         debug_assert_eq!(self.edge_stack.first(), Some(tree_edge));
@@ -2013,11 +1972,12 @@ impl<'graph, 'edges> WideBCTreeBuilder<'graph, 'edges> {
         let node_count = self.current_block_node_count(node_start) as usize;
         if self.block_nodes_flat.is_some() {
             for local_node in 0..node_count {
-                let node = self
-                    .block_nodes_flat
-                    .as_ref()
-                    .expect("missing BC-tree block nodes")
-                    .get(stored_start + local_node) as usize;
+                let node = {
+                    let Some(nodes) = self.block_nodes_flat.as_ref() else {
+                        unreachable!("missing BC-tree block nodes");
+                    };
+                    nodes.get(stored_start + local_node) as usize
+                };
                 self.clear_block_node(node);
             }
         } else {
@@ -2086,4 +2046,3 @@ impl<'graph, 'edges> WideBCTreeBuilder<'graph, 'edges> {
         }
     }
 }
-

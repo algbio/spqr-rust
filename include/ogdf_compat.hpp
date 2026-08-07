@@ -304,6 +304,22 @@ public:
             });
         }
     }
+
+    uint32_t adjCursor(node v) const { return g_->adjCursor(v.idx); }
+
+    bool adjNext(uint32_t cursor, node& neighbor, edge& e, uint32_t& nextCursor) const {
+        uint32_t n, rawEdge, next = cursor;
+        while (g_->adjNext(next, n, rawEdge, nextCursor)) {
+            if (!isDeleted_(rawEdge)) {
+                neighbor = node{n};
+                e = edge{rawEdge};
+                return true;
+            }
+            next = nextCursor;
+        }
+        return false;
+    }
+
     
     uint32_t degree(node v) const {
         if (deletedCount_ == 0) return g_->degree(v.idx);
@@ -401,54 +417,107 @@ public:
         n_ = n;
         parents_.clear();
         if (n != 0) parents_.assign(parents, parents + n);
-        src_.clear();
-        tgt_.clear();
-        for (uint32_t child = 0; child < n_; ++child) {
-            if (parents_[child] != UINT32_MAX && parents_[child] != child) {
-                src_.push_back(parents_[child]);
-                tgt_.push_back(child);
+        src_.clear(); tgt_.clear();
+        for (uint32_t i = 0; i < n; ++i) {
+            if (parents_[i] != UINT32_MAX && parents_[i] != i) {
+                src_.push_back(parents_[i]);
+                tgt_.push_back(i);
             }
         }
     }
 
     uint32_t numberOfNodes() const { return n_; }
-    uint32_t numberOfEdges() const { return static_cast<uint32_t>(src_.size()); }
-    node source(edge e) const { return node{src_[e.idx]}; }
-    node target(edge e) const { return node{tgt_[e.idx]}; }
-    uint32_t parentIndex(node v) const { return parents_[v.idx]; }
-};
-class TreeGraph {
-public:
-    enum class BuildMode { FullAdjacency, EdgeOnly };
-    uint32_t n_ = 0;
-    std::vector<uint32_t> parents_, src_, tgt_;
-    std::vector<std::vector<std::pair<uint32_t, uint32_t>>> adj_;  // adj_[v] = [(neighbor, edge_idx), ...]
-public:
-    void build(uint32_t n, const std::vector<uint32_t>& parents) {
-        n_ = n; parents_ = parents;
-        src_.clear(); tgt_.clear();
-        adj_.assign(n, {});
-        for (uint32_t i = 0; i < n; ++i) {
-            if (parents[i] != UINT32_MAX && parents[i] != i) {
-                uint32_t eIdx = src_.size();
-                src_.push_back(parents[i]);
-                tgt_.push_back(i);
-                adj_[parents[i]].push_back({i, eIdx});
-                adj_[i].push_back({parents[i], eIdx});
-            }
-        }
-    }
-    uint32_t numberOfNodes() const { return n_; }
     uint32_t numberOfEdges() const { return src_.size(); }
     node source(edge e) const { return node{src_[e.idx]}; }
     node target(edge e) const { return node{tgt_[e.idx]}; }
-    
+    uint32_t parentIndex(node v) const { return parents_[v.idx]; }
+
+    // The core is built by scanning child IDs and skipping the unique root.
+    // Therefore the edge owned by child c is c before the root and c - 1 after.
+    edge edgeForChild(uint32_t child, uint32_t root) const {
+        return edge{child - static_cast<uint32_t>(child > root)};
+    }
+};
+
+// Zero-copy view over the parent/children columns already owned by the Rust
+// result or FlatData. Children are in ascending tree-node ID order. Merging the
+// parent event at child ID v reproduces the old adjacency insertion order.
+class AdjacencyView {
+    enum class State : uint8_t { Disabled, Pending, Active };
+
+    const uint32_t* childrenOffsets_ = nullptr;
+    const uint32_t* children_ = nullptr;
+    uint32_t root_ = UINT32_MAX;
+    mutable State state_ = State::Disabled;
+
+public:
+    void bind(const uint32_t* childrenOffsets, const uint32_t* children,
+              uint32_t root, bool enabled) {
+        childrenOffsets_ = childrenOffsets;
+        children_ = children;
+        root_ = root;
+        state_ = enabled ? State::Pending : State::Disabled;
+    }
+
     template<typename F>
-    void forEachAdj(node v, F&& f) const {
-        for (auto& [neighbor, eIdx] : adj_[v.idx]) {
-            f(node{neighbor}, edge{eIdx});
+    void forEachAdj(const CompactTreeCore& core, node v, F&& f) const {
+        if (state_ == State::Disabled)
+            throw std::logic_error("TreeGraph adjacency was not materialized for this writer-only view");
+        if (state_ == State::Pending) state_ = State::Active;
+
+        uint32_t position = childrenOffsets_[v.idx];
+        const uint32_t end = childrenOffsets_[v.idx + 1];
+        while (position < end && children_[position] < v.idx) {
+            const uint32_t child = children_[position++];
+            f(node{child}, core.edgeForChild(child, root_));
+        }
+
+        const uint32_t parent = core.parentIndex(v);
+        if (parent != UINT32_MAX && parent != v.idx) {
+            f(node{parent}, core.edgeForChild(v.idx, root_));
+        }
+
+        while (position < end) {
+            const uint32_t child = children_[position++];
+            f(node{child}, core.edgeForChild(child, root_));
         }
     }
+
+    bool materialized() const { return state_ == State::Active; }
+    bool enabled() const { return state_ != State::Disabled; }
+};
+
+class TreeGraph {
+public:
+    enum class BuildMode { FullAdjacency, EdgeOnly };
+
+private:
+    CompactTreeCore core_;
+    AdjacencyView adjacency_;
+
+public:
+    void build(uint32_t n, const uint32_t* parents,
+               const uint32_t* childrenOffsets, const uint32_t* children,
+               uint32_t root,
+               BuildMode mode = BuildMode::FullAdjacency) {
+        core_.build(n, parents);
+        adjacency_.bind(childrenOffsets, children, root,
+                        mode == BuildMode::FullAdjacency);
+    }
+
+    uint32_t numberOfNodes() const { return core_.numberOfNodes(); }
+    uint32_t numberOfEdges() const { return core_.numberOfEdges(); }
+    node source(edge e) const { return core_.source(e); }
+    node target(edge e) const { return core_.target(e); }
+
+    template<typename F>
+    void forEachAdj(node v, F&& f) const {
+        adjacency_.forEachAdj(core_, v, std::forward<F>(f));
+    }
+
+    bool adjacencyMaterialized() const { return adjacency_.materialized(); }
+    bool adjacencyEnabled() const { return adjacency_.enabled(); }
+    std::size_t adjacencyOuterCapacity() const { return 0u; }
     
     // Zero-overhead ranges - size computed on access
     struct NodesRange {
@@ -462,8 +531,8 @@ public:
             bool operator==(It o) const { return i == o.i; }
         };
         It begin() const { return {0}; }
-        It end() const { return {g->n_}; }
-        uint32_t size() const { return g->n_; }
+        It end() const { return {g->numberOfNodes()}; }
+        uint32_t size() const { return g->numberOfNodes(); }
     };
     struct EdgesRange {
         const TreeGraph* g;
@@ -476,15 +545,15 @@ public:
             bool operator==(It o) const { return i == o.i; }
         };
         It begin() const { return {0}; }
-        It end() const { return {uint32_t(g->src_.size())}; }
-        uint32_t size() const { return g->src_.size(); }
+        It end() const { return {g->numberOfEdges()}; }
+        uint32_t size() const { return g->numberOfEdges(); }
     };
     
     // OGDF-style member access (lazy evaluation - zero sync overhead)
     NodesRange nodes{this};
     EdgesRange edges{this};
 
-    node firstNode() const { return n_ > 0 ? node{0u} : node{}; }
+    node firstNode() const { return numberOfNodes() > 0 ? node{0u} : node{}; }
 };
 
 class StaticSPQRTree {
@@ -528,63 +597,85 @@ private:
     std::unique_ptr<spqr_rust::RustSPQRResult> result_;
     std::unique_ptr<FlatData> ownedFlat_;
     spqr_rust::SpqrTreeFlatView view_;
-    std::vector<uint32_t> parents_;
     TreeGraph tree_;
     const Graph* gccGraph_ = nullptr;
 
-    mutable std::unordered_map<uint64_t, uint32_t> virtualIndex_;
+    mutable std::vector<uint32_t> virtualAtChild_;
+    mutable std::vector<uint32_t> virtualAtParent_;
     mutable bool virtualIndexBuilt_ = false;
-
-    static uint64_t packTreePair_(uint32_t from, uint32_t to) {
-        return (static_cast<uint64_t>(from) << 32) | static_cast<uint64_t>(to);
-    }
+    mutable bool virtualIndexFinalized_ = false;
 
     void buildVirtualIndex_() const {
         if (virtualIndexBuilt_) return;
-        // Walk all tree nodes, scan their skeleton edges once, index virtual ones.
-        virtualIndex_.reserve(view_.numNodes * 2);
+        if (virtualIndexFinalized_)
+            throw std::logic_error("SPQR virtual lookup was released after its final consumer");
+        virtualAtChild_.assign(view_.numNodes, UINT32_MAX);
+        virtualAtParent_.assign(view_.numNodes, UINT32_MAX);
         for (uint32_t tn = 0; tn < view_.numNodes; ++tn) {
             uint32_t s = view_.skeletonOffsets[tn];
             uint32_t e = view_.skeletonOffsets[tn + 1];
             for (uint32_t i = s; i < e; ++i) {
                 const auto& se = view_.skeletonEdges[i];
                 if (se.real_edge == UINT32_MAX) {
-                    // Virtual edge: connects tn to se.twin_tree_node
-                    virtualIndex_.emplace(packTreePair_(tn, se.twin_tree_node), i);
+                    if (se.twin_tree_node >= view_.numNodes) continue;
+                    const uint32_t twin = static_cast<uint32_t>(se.twin_tree_node);
+                    if (view_.nodeParents[tn] == twin) {
+                        uint32_t& slot = virtualAtChild_[tn];
+                        if (slot == UINT32_MAX) slot = i;
+                    } else if (view_.nodeParents[twin] == tn) {
+                        uint32_t& slot = virtualAtParent_[twin];
+                        if (slot == UINT32_MAX) slot = i;
+                    }
                 }
             }
         }
         virtualIndexBuilt_ = true;
     }
 
-    void buildTree() {
-        parents_.resize(view_.numNodes);
-        for (uint32_t i = 0; i < view_.numNodes; ++i) parents_[i] = view_.nodeParents[i];
-        tree_.build(view_.numNodes, parents_);
+    void buildTree(TreeGraph::BuildMode mode = TreeGraph::BuildMode::FullAdjacency) {
+        tree_.build(view_.numNodes, view_.nodeParents, view_.childrenOffsets,
+                    view_.children, view_.root, mode);
+    }
+    uint32_t findVirtualIndex_(tree_node from, tree_node to) const {
+        buildVirtualIndex_();
+        if (from.idx >= view_.numNodes || to.idx >= view_.numNodes) return UINT32_MAX;
+        if (view_.nodeParents[from.idx] == to.idx) return virtualAtChild_[from.idx];
+        if (view_.nodeParents[to.idx] == from.idx) return virtualAtParent_[to.idx];
+        return UINT32_MAX;
     }
     edge findVirtual(tree_node from, tree_node to) const {
-        buildVirtualIndex_();
-        auto it = virtualIndex_.find(packTreePair_(from.idx, to.idx));
-        if (it == virtualIndex_.end()) return INVALID_EDGE;
+        const uint32_t index = findVirtualIndex_(from, to);
+        if (index == UINT32_MAX) return INVALID_EDGE;
         // Return LOCAL index within the from-skeleton
-        return edge{it->second - view_.skeletonOffsets[from.idx]};
+        return edge{index - view_.skeletonOffsets[from.idx]};
     }
     // Return GLOBAL edge index (unique across all skeletons) for use as map key
     edge findVirtualGlobal(tree_node from, tree_node to) const {
-        buildVirtualIndex_();
-        auto it = virtualIndex_.find(packTreePair_(from.idx, to.idx));
-        if (it == virtualIndex_.end()) return INVALID_EDGE;
-        return edge{it->second};
+        const uint32_t index = findVirtualIndex_(from, to);
+        return index == UINT32_MAX ? INVALID_EDGE : edge{index};
     }
 
 public:
     enum class NodeType { SNode, PNode, RNode };
     using SkeletonEdge = ::SkeletonEdge;
+
+    bool virtualLookupBuilt() const { return virtualIndexBuilt_; }
+    std::size_t virtualLookupSlots() const {
+        return virtualAtChild_.size() + virtualAtParent_.size();
+    }
+    void releaseVirtualLookupFinal() {
+        std::vector<uint32_t>().swap(virtualAtChild_);
+        std::vector<uint32_t>().swap(virtualAtParent_);
+        virtualIndexBuilt_ = false;
+        virtualIndexFinalized_ = true;
+    }
     
-    explicit StaticSPQRTree(const Graph& g)
+    explicit StaticSPQRTree(
+        const Graph& g,
+        TreeGraph::BuildMode mode = TreeGraph::BuildMode::FullAdjacency)
         : result_(std::make_unique<spqr_rust::RustSPQRResult>(g.raw())),
           view_(*result_),
-          gccGraph_(&g) { buildTree(); }
+          gccGraph_(&g) { buildTree(mode); }
 
     /**
      * Build via SP-Compress + Reconstruct
@@ -633,7 +724,12 @@ public:
     uint32_t numberOfNodes() const { return view_.numNodes; }
     NodeType typeOf(tree_node tn) const { return view_.nodeTypes[tn.idx] == 0 ? NodeType::SNode : view_.nodeTypes[tn.idx] == 1 ? NodeType::PNode : NodeType::RNode; }
     const TreeGraph& tree() const { return tree_; }
-    tree_node parent(tree_node tn) const { return node{parents_[tn.idx]}; }
+    tree_node parent(tree_node tn) const {
+        if (view_.nodeParents == nullptr || tn.idx >= view_.numNodes)
+            return INVALID_NODE;
+        const uint32_t parentId = view_.nodeParents[tn.idx];
+        return parentId < view_.numNodes ? tree_node{parentId} : INVALID_NODE;
+    }
 
 
     const spqr_rust::SpqrTreeFlatView& flatView() const { return view_; }
@@ -1198,20 +1294,32 @@ using tree_node = node;
 class TreeGraph {
 public:
     enum class BuildMode { FullAdjacency, EdgeOnly };
+
+private:
     uint32_t n_ = 0;
     std::vector<uint32_t> parents_, src_, tgt_;
     std::vector<std::vector<std::pair<uint32_t, uint32_t>>> adj_;
+    bool adjacencyMaterialized_ = true;
+
 public:
-    void build(uint32_t n, const std::vector<uint32_t>& parents) {
-        n_ = n; parents_ = parents; src_.clear(); tgt_.clear();
-        adj_.assign(n, {});
+    void build(uint32_t n, const uint32_t* parents,
+               BuildMode mode = BuildMode::FullAdjacency) {
+        n_ = n;
+        parents_.clear();
+        if (n != 0) parents_.assign(parents, parents + n);
+        src_.clear(); tgt_.clear();
+        adjacencyMaterialized_ = mode == BuildMode::FullAdjacency;
+        if (adjacencyMaterialized_) adj_.assign(n, {});
+        else adj_.clear();
         for (uint32_t i = 0; i < n; ++i) {
-            if (parents[i] != UINT32_MAX && parents[i] != i) {
+            if (parents_[i] != UINT32_MAX && parents_[i] != i) {
                 uint32_t eIdx = src_.size();
-                src_.push_back(parents[i]);
+                src_.push_back(parents_[i]);
                 tgt_.push_back(i);
-                adj_[parents[i]].push_back({i, eIdx});
-                adj_[i].push_back({parents[i], eIdx});
+                if (adjacencyMaterialized_) {
+                    adj_[parents_[i]].push_back({i, eIdx});
+                    adj_[i].push_back({parents_[i], eIdx});
+                }
             }
         }
     }
@@ -1221,10 +1329,15 @@ public:
     node target(edge e) const { return node{tgt_[e.idx]}; }
     template<typename F>
     void forEachAdj(node v, F&& f) const {
+        if (!adjacencyMaterialized_)
+            throw std::logic_error("TreeGraph adjacency was not materialized for this writer-only view");
         for (auto& [neighbor, eIdx] : adj_[v.idx]) {
             f(node{neighbor}, edge{eIdx});
         }
     }
+
+    bool adjacencyMaterialized() const { return adjacencyMaterialized_; }
+    std::size_t adjacencyOuterCapacity() const { return adj_.capacity(); }
     
     // Zero-overhead ranges - size computed on access
     struct NodesRange {
@@ -1264,51 +1377,79 @@ public:
 class StaticSPQRTree {
     std::unique_ptr<spqr_rust::RustSPQRResult> result_;
     spqr_rust::SpqrTreeFlatView view_;
-    std::vector<uint32_t> parents_;
     TreeGraph tree_;
 
-    // Precomputed O(1) virtual-edge index (see spqr::StaticSPQRTree for rationale).
-    mutable std::unordered_map<uint64_t, uint32_t> virtualIndex_;
+    mutable std::vector<uint32_t> virtualAtChild_;
+    mutable std::vector<uint32_t> virtualAtParent_;
     mutable bool virtualIndexBuilt_ = false;
-
-    static uint64_t packTreePair_(uint32_t from, uint32_t to) {
-        return (static_cast<uint64_t>(from) << 32) | static_cast<uint64_t>(to);
-    }
+    mutable bool virtualIndexFinalized_ = false;
 
     void buildVirtualIndex_() const {
         if (virtualIndexBuilt_) return;
-        virtualIndex_.reserve(view_.numNodes * 2);
+        if (virtualIndexFinalized_)
+            throw std::logic_error("SPQR virtual lookup was released after its final consumer");
+        virtualAtChild_.assign(view_.numNodes, UINT32_MAX);
+        virtualAtParent_.assign(view_.numNodes, UINT32_MAX);
         for (uint32_t tn = 0; tn < view_.numNodes; ++tn) {
             uint32_t s = view_.skeletonOffsets[tn];
             uint32_t e = view_.skeletonOffsets[tn + 1];
             for (uint32_t i = s; i < e; ++i) {
                 const auto& se = view_.skeletonEdges[i];
                 if (se.real_edge == UINT32_MAX) {
-                    virtualIndex_.emplace(packTreePair_(tn, se.twin_tree_node), i);
+                    if (se.twin_tree_node >= view_.numNodes) continue;
+                    const uint32_t twin = static_cast<uint32_t>(se.twin_tree_node);
+                    if (view_.nodeParents[tn] == twin) {
+                        uint32_t& slot = virtualAtChild_[tn];
+                        if (slot == UINT32_MAX) slot = i;
+                    } else if (view_.nodeParents[twin] == tn) {
+                        uint32_t& slot = virtualAtParent_[twin];
+                        if (slot == UINT32_MAX) slot = i;
+                    }
                 }
             }
         }
         virtualIndexBuilt_ = true;
     }
 
-    void buildTree() { parents_.resize(view_.numNodes); for (uint32_t i = 0; i < view_.numNodes; ++i) parents_[i] = view_.nodeParents[i]; tree_.build(view_.numNodes, parents_); }
-    edge findVirtual(tree_node from, tree_node to) const {
+    void buildTree(TreeGraph::BuildMode mode = TreeGraph::BuildMode::FullAdjacency) {
+        tree_.build(view_.numNodes, view_.nodeParents, mode);
+    }
+    uint32_t findVirtualIndex_(tree_node from, tree_node to) const {
         buildVirtualIndex_();
-        auto it = virtualIndex_.find(packTreePair_(from.idx, to.idx));
-        if (it == virtualIndex_.end()) return INVALID_EDGE;
-        return edge{it->second - view_.skeletonOffsets[from.idx]};
+        if (from.idx >= view_.numNodes || to.idx >= view_.numNodes) return UINT32_MAX;
+        if (view_.nodeParents[from.idx] == to.idx) return virtualAtChild_[from.idx];
+        if (view_.nodeParents[to.idx] == from.idx) return virtualAtParent_[to.idx];
+        return UINT32_MAX;
+    }
+    edge findVirtual(tree_node from, tree_node to) const {
+        const uint32_t index = findVirtualIndex_(from, to);
+        if (index == UINT32_MAX) return INVALID_EDGE;
+        return edge{index - view_.skeletonOffsets[from.idx]};
     }
     edge findVirtualGlobal(tree_node from, tree_node to) const {
-        buildVirtualIndex_();
-        auto it = virtualIndex_.find(packTreePair_(from.idx, to.idx));
-        if (it == virtualIndex_.end()) return INVALID_EDGE;
-        return edge{it->second};
+        const uint32_t index = findVirtualIndex_(from, to);
+        return index == UINT32_MAX ? INVALID_EDGE : edge{index};
     }
 public:
     enum class NodeType { SNode, PNode, RNode };
     using SkeletonEdge = ::SkeletonEdge;
+
+    bool virtualLookupBuilt() const { return virtualIndexBuilt_; }
+    std::size_t virtualLookupSlots() const {
+        return virtualAtChild_.size() + virtualAtParent_.size();
+    }
+    void releaseVirtualLookupFinal() {
+        std::vector<uint32_t>().swap(virtualAtChild_);
+        std::vector<uint32_t>().swap(virtualAtParent_);
+        virtualIndexBuilt_ = false;
+        virtualIndexFinalized_ = true;
+    }
     
-    explicit StaticSPQRTree(const Graph& g) : result_(std::make_unique<spqr_rust::RustSPQRResult>(g.raw())), view_(*result_) { buildTree(); }
+    explicit StaticSPQRTree(
+        const Graph& g,
+        TreeGraph::BuildMode mode = TreeGraph::BuildMode::FullAdjacency)
+        : result_(std::make_unique<spqr_rust::RustSPQRResult>(g.raw())),
+          view_(*result_) { buildTree(mode); }
 
     /**
      * Build via SP-Compress + Reconstruct.
@@ -1362,7 +1503,12 @@ public:
     uint32_t numberOfNodes() const { return view_.numNodes; }
     NodeType typeOf(tree_node tn) const { return view_.nodeTypes[tn.idx] == 0 ? NodeType::SNode : view_.nodeTypes[tn.idx] == 1 ? NodeType::PNode : NodeType::RNode; }
     const TreeGraph& tree() const { return tree_; }
-    tree_node parent(tree_node tn) const { return node{parents_[tn.idx]}; }
+    tree_node parent(tree_node tn) const {
+        if (view_.nodeParents == nullptr || tn.idx >= view_.numNodes)
+            return INVALID_NODE;
+        const uint32_t parentId = view_.nodeParents[tn.idx];
+        return parentId < view_.numNodes ? tree_node{parentId} : INVALID_NODE;
+    }
 
     const spqr_rust::SpqrTreeFlatView& flatView() const { return view_; }
     
@@ -1518,102 +1664,110 @@ inline uint32_t connectedComponents(const Graph& g, NA& comp) {
 
 namespace spqr {
 
-// Check if directed graph is acyclic 
+template<bool Skip>
+inline bool isAcyclicImpl(const Graph& G, edge skipped) {
+    NodeArray<std::uint8_t> state(G, 0);
+    struct Frame { node vertex; std::uint32_t cursor; };
+    std::vector<Frame> stack;
+    stack.reserve(G.numberOfNodes());
+    for (node root : G.nodes) {
+        if (state[root] != 0) continue;
+        state[root] = 1;
+        stack.push_back({root, G.adjCursor(root)});
+        while (!stack.empty()) {
+            Frame& frame = stack.back();
+            node neighbor;
+            edge current;
+            std::uint32_t next = 0;
+            bool descended = false;
+            while (G.adjNext(frame.cursor, neighbor, current, next)) {
+                frame.cursor = next;
+                if constexpr (Skip) if (current.idx == skipped.idx) continue;
+                if (G.source(current) != frame.vertex) continue;
+                if (state[neighbor] == 1) return false;
+                if (state[neighbor] == 0) {
+                    state[neighbor] = 1;
+                    stack.push_back({neighbor, G.adjCursor(neighbor)});
+                    descended = true;
+                    break;
+                }
+            }
+            if (!descended) {
+                state[frame.vertex] = 2;
+                stack.pop_back();
+            }
+        }
+    }
+    return true;
+}
+
 inline bool isAcyclic(const Graph& G) {
-    NodeArray<int> state(G, 0);  // 0=unvisited, 1=visiting, 2=done
-    bool hasCycle = false;
-    
-    std::function<void(node)> dfs = [&](node u) {
-        if (hasCycle) return;
-        state[u] = 1;
-        G.forEachAdj(u, [&](node v, edge e) {
-            if (hasCycle) return;
-            if (G.source(e) != u) return; 
-            if (state[v] == 1) { hasCycle = true; return; }
-            if (state[v] == 0) dfs(v);
-        });
-        state[u] = 2;
-    };
-    
-    for (node v : G.nodes) {
-        if (state[v] == 0) dfs(v);
-        if (hasCycle) return false;
-    }
-    return true;
+    return isAcyclicImpl<false>(G, INVALID_EDGE);
 }
 
-// Acyclicity check pretending edge skip is absent
 inline bool isAcyclicWithoutEdge(const Graph& G, edge skip) {
-    NodeArray<int> state(G, 0);
-    bool hasCycle = false;
-
-    std::function<void(node)> dfs = [&](node u) {
-        if (hasCycle) return;
-        state[u] = 1;
-        G.forEachAdj(u, [&](node v, edge e) {
-            if (hasCycle) return;
-            if (e.idx == skip.idx) return; // pretend this edge is gone
-            if (G.source(e) != u) return; // only outgoing
-            if (state[v] == 1) { hasCycle = true; return; }
-            if (state[v] == 0) dfs(v);
-        });
-        state[u] = 2;
-    };
-
-    for (node v : G.nodes) {
-        if (state[v] == 0) dfs(v);
-        if (hasCycle) return false;
-    }
-    return true;
+    return isAcyclicImpl<true>(G, skip);
 }
 
-// Compute strongly CC (with Kosaraju algorithm)
 template<typename NA>
 inline int strongComponents(const Graph& G, NA& comp) {
-    const uint32_t n = G.numberOfNodes();
+    const std::uint32_t n = G.numberOfNodes();
     comp.init(G, -1);
-    
-    // First DFS to get finish order
     std::vector<node> order;
     order.reserve(n);
-    NodeArray<bool> vis(G, false);
-    
-    std::function<void(node)> dfs1 = [&](node u) {
-        vis[u] = true;
-        G.forEachAdj(u, [&](node v, edge e) {
-            if (G.source(e) != u) return;  // outgoing only
-            if (!vis[v]) dfs1(v);
-        });
-        order.push_back(u);
-    };
-    
-    for (node v : G.nodes) {
-        if (!vis[v]) dfs1(v);
-    }
-    
-    // Build reverse adjacency
-    std::vector<std::vector<node>> radj(n);
-    for (edge e : G.edges) {
-        radj[G.target(e).idx].push_back(G.source(e));
-    }
-    
-    // Second DFS on reverse graph in reverse finish order
-    int numSCC = 0;
-    std::function<void(node, int)> dfs2 = [&](node u, int c) {
-        comp[u] = c;
-        for (node v : radj[u.idx]) {
-            if (comp[v] == -1) dfs2(v, c);
-        }
-    };
-    
-    for (int i = n - 1; i >= 0; --i) {
-        node u = order[i];
-        if (comp[u] == -1) {
-            dfs2(u, numSCC++);
+    NodeArray<bool> visited(G, false);
+    struct Frame { node vertex; std::uint32_t cursor; };
+    std::vector<Frame> frames;
+    frames.reserve(n);
+    for (node root : G.nodes) {
+        if (visited[root]) continue;
+        visited[root] = true;
+        frames.push_back({root, G.adjCursor(root)});
+        while (!frames.empty()) {
+            Frame& frame = frames.back();
+            node neighbor;
+            edge current;
+            std::uint32_t next = 0;
+            bool descended = false;
+            while (G.adjNext(frame.cursor, neighbor, current, next)) {
+                frame.cursor = next;
+                if (G.source(current) != frame.vertex || visited[neighbor]) continue;
+                visited[neighbor] = true;
+                frames.push_back({neighbor, G.adjCursor(neighbor)});
+                descended = true;
+                break;
+            }
+            if (!descended) {
+                order.push_back(frame.vertex);
+                frames.pop_back();
+            }
         }
     }
-    
-    return numSCC;
+
+    std::vector<std::vector<node>> reverse(n);
+    for (edge current : G.edges) {
+        reverse[G.target(current).idx].push_back(G.source(current));
+    }
+    int count = 0;
+    std::vector<node> stack;
+    stack.reserve(n);
+    for (std::size_t i = order.size(); i-- != 0;) {
+        const node root = order[i];
+        if (comp[root] != -1) continue;
+        comp[root] = count;
+        stack.push_back(root);
+        while (!stack.empty()) {
+            const node current = stack.back();
+            stack.pop_back();
+            for (node neighbor : reverse[current.idx]) {
+                if (comp[neighbor] != -1) continue;
+                comp[neighbor] = count;
+                stack.push_back(neighbor);
+            }
+        }
+        ++count;
+    }
+    return count;
 }
 
 }
